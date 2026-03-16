@@ -1,0 +1,27 @@
+Crossroads
+Hospital Ahead
+Junction Ahead
+Mosque Ahead
+No Pedestrians
+No Vehicle Entry
+Pedestrians Crossing
+School Ahead
+Sharp Left Turn
+Sharp Right Turn
+Side Road On Left
+Side Road On Right
+Speed Breaker
+Speed Limit 20 km
+Speed Limit 40Km
+Speed Limit 80Km
+Traffic Merges From Left
+Traffic Merges From Right
+U Turn
+bicycle
+bus
+car
+cng
+motorcycle
+other-vehicle
+person
+rickshaw
