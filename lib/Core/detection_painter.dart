@@ -68,22 +68,6 @@ void drawDetections(
     final color = colorForLabel(det.label);
     final bb = det.boundingBox;
 
-    print('bb: $bb');
-    print('displayRect: $displayRect');
-    print('left: ${displayRect.left}');
-    print('top: ${displayRect.top}');
-    print('right: ${displayRect.right}');
-
-    print('bottom: ${displayRect.bottom}');
-    print('width: ${displayRect.width}');
-    print('height: ${displayRect.height}');
-    print('bb.left: ${bb.left}');
-    print('bb.top: ${bb.top}');
-    print('bb.right: ${bb.right}');
-    print('bb.bottom: ${bb.bottom}');
-    print('bb.width: ${bb.width}');
-    print('bb.height: ${bb.height}');
-
     // Map normalised [0,1] → pixel coords inside displayRect
     final l = displayRect.left + bb.left * displayRect.width;
     final t = displayRect.top + bb.top * displayRect.height;
@@ -92,7 +76,7 @@ void drawDetections(
     final rect = ui.Rect.fromLTRB(l, t, r, b);
 
     // Fill
-    canvas.drawRect(rect, Paint()..color = color.withOpacity(0.15));
+    canvas.drawRect(rect, Paint()..color = color.withValues(alpha: 0.15));
 
     // Border
     canvas.drawRect(

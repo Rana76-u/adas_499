@@ -2,18 +2,18 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 
-import 'detection_painter.dart';
-import 'yolo_model.dart';
+import '../../Core/detection_painter.dart';
+import '../../Core/yolo_model.dart';
 
-class CameraDetectionScreen extends StatefulWidget {
+class LiveCameraScreen extends StatefulWidget {
   final YoloModel model;
-  const CameraDetectionScreen({super.key, required this.model});
+  const LiveCameraScreen({super.key, required this.model});
 
   @override
-  State<CameraDetectionScreen> createState() => _CameraDetectionScreenState();
+  State<LiveCameraScreen> createState() => _LiveCameraScreenState();
 }
 
-class _CameraDetectionScreenState extends State<CameraDetectionScreen> {
+class _LiveCameraScreenState extends State<LiveCameraScreen> {
   CameraController? _ctrl;
   List<Detection> _detections = [];
   bool _processing = false;
@@ -188,7 +188,7 @@ class _Hud extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.60),
+        color: Colors.black.withValues(alpha: 0.60),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: Colors.white12),
       ),
@@ -234,7 +234,7 @@ class _BottomStrip extends StatelessWidget {
 
     return Container(
       height: 52,
-      color: Colors.black.withOpacity(0.55),
+      color: Colors.black.withValues(alpha: 0.55),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
@@ -246,8 +246,8 @@ class _BottomStrip extends StatelessWidget {
           return Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
-              color: color.withOpacity(0.20),
-              border: Border.all(color: color.withOpacity(0.70)),
+              color: color.withValues(alpha: 0.20),
+              border: Border.all(color: color.withValues(alpha: 0.70)),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
