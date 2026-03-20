@@ -7,11 +7,10 @@ import '../../Core/yolo_model.dart';
 
 /// Live camera detection screen.
 ///
-/// All inference runs natively in Kotlin (CameraX + TFLite GPU/NNAPI).
-/// This widget only:
-///   • Starts / stops the native camera via [NativeDetectionBridge].
-///   • Renders an overlay of bounding boxes using [CustomPaint].
-///   • Shows an FPS / inference-time HUD.
+/// The camera preview is rendered via a Flutter [Texture] widget that maps
+/// directly to the native SurfaceTexture registered with [FlutterEngine].
+/// All inference (YUV→RGB, letterbox, TFLite, NMS) runs entirely in Kotlin.
+/// Dart only receives final bounding-box data through the EventChannel.
 class LiveCameraScreen extends StatefulWidget {
   final NativeDetectionBridge bridge;
   const LiveCameraScreen({super.key, required this.bridge});
@@ -28,6 +27,10 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   int    _inferMs = 0;
   String? _error;
 
+  /// The Flutter texture ID returned by native `startCamera`.
+  /// Until it is set the screen shows a loading indicator.
+  int? _textureId;
+
   @override
   void initState() {
     super.initState();
@@ -37,7 +40,10 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
 
   Future<void> _startNativeCamera() async {
     try {
-      await widget.bridge.startCamera();
+      final textureId = await widget.bridge.startCamera();
+      if (!mounted) return;
+      setState(() => _textureId = textureId);
+
       widget.bridge.detectionStream.listen(
         _onFrame,
         onError: (e) {
@@ -51,6 +57,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
 
   void _onFrame(NativeFrame frame) {
     if (!mounted) return;
+    // Use a direct setState — this is already throttled by the native
+    // frame-drop gate, so we never flood the UI thread.
     setState(() {
       _detections = frame.detections;
       _fps        = frame.fps;
@@ -63,6 +71,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     if (state == AppLifecycleState.paused) {
       widget.bridge.stopCamera();
     } else if (state == AppLifecycleState.resumed) {
+      _textureId = null;
       _startNativeCamera();
     }
   }
@@ -80,9 +89,25 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(_error!,
-              style: const TextStyle(color: Colors.redAccent),
-              textAlign: TextAlign.center),
+          child: Text(
+            _error!,
+            style: const TextStyle(color: Colors.redAccent),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+
+    if (_textureId == null) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Color(0xFF1A73E8)),
+            SizedBox(height: 16),
+            Text('Starting camera…',
+                style: TextStyle(color: Colors.white54, fontSize: 13)),
+          ],
         ),
       );
     }
@@ -90,10 +115,14 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     return Stack(
       fit: StackFit.expand,
       children: [
-        // ── Camera preview (black background; native CameraX renders behind it)
-        Container(color: Colors.black),
+        // ── Native camera preview via Flutter Texture widget ──────────────────
+        // Texture maps directly to the SurfaceTexture registered in Kotlin.
+        // Zero pixel copies — the GPU composites this straight onto the screen.
+        Texture(textureId: _textureId!),
 
         // ── Bounding-box overlay ──────────────────────────────────────────────
+        // Uses a fullscreen painter; bounding boxes are already in normalised
+        // [0,1] screen coordinates, so no fit-transform is needed here.
         SizedBox.expand(
           child: CustomPaint(
             painter: _FullscreenDetectionPainter(detections: _detections),
@@ -141,8 +170,8 @@ class _FullscreenDetectionPainter extends CustomPainter {
 
 class _Hud extends StatelessWidget {
   final double fps;
-  final int inferMs;
-  final int count;
+  final int    inferMs;
+  final int    count;
   const _Hud({required this.fps, required this.inferMs, required this.count});
 
   @override
@@ -159,7 +188,7 @@ class _Hud extends StatelessWidget {
         children: [
           _hudRow(Icons.speed,          Colors.greenAccent, '${fps.toStringAsFixed(1)} FPS'),
           const SizedBox(height: 2),
-          _hudRow(Icons.timer_outlined, Colors.amberAccent, '${inferMs} ms'),
+          _hudRow(Icons.timer_outlined, Colors.amberAccent, '$inferMs ms'),
           const SizedBox(height: 2),
           Text('$count object${count == 1 ? '' : 's'}',
               style: const TextStyle(color: Colors.white60, fontSize: 11)),
@@ -174,7 +203,8 @@ class _Hud extends StatelessWidget {
       Icon(icon, color: color, size: 12),
       const SizedBox(width: 4),
       Text(text,
-          style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+          style: TextStyle(
+            color: color, fontSize: 12, fontWeight: FontWeight.bold)),
     ],
   );
 }
@@ -198,19 +228,21 @@ class _BottomStrip extends StatelessWidget {
         itemCount: sorted.length,
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (_, i) {
-          final d = sorted[i];
+          final d     = sorted[i];
           final color = colorForLabel(d.label);
           return Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.20),
+              color:  color.withValues(alpha: 0.20),
               border: Border.all(color: color.withValues(alpha: 0.70)),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
               '${d.label}  ${(d.confidence * 100).toStringAsFixed(0)}%',
               style: const TextStyle(
-                  color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600),
             ),
           );
         },

@@ -4,11 +4,13 @@ import 'yolo_model.dart';
 
 /// Dart-side bridge to the native Android inference engine.
 ///
-/// All heavy work (camera, YUV conversion, letterbox, TFLite, NMS) runs
+/// All heavy work (camera, YUV→RGB, letterbox, TFLite, NMS) runs
 /// entirely in Kotlin on a background thread.  This class only:
 ///   1. Tells native to load the model via [MethodChannel].
 ///   2. Tells native to start / stop the camera.
-///   3. Exposes a [detectionStream] that emits [NativeFrame] objects
+///   3. Returns the Flutter [textureId] from [startCamera] so the UI
+///      can display a [Texture] widget backed by the native preview.
+///   4. Exposes a [detectionStream] that emits [NativeFrame] objects
 ///      as fast as native can produce them.
 class NativeDetectionBridge {
   static const _method = MethodChannel('com.example.adas_499/control');
@@ -20,10 +22,9 @@ class NativeDetectionBridge {
 
   /// Load the TFLite model on the native side.
   ///
-  /// [modelPath] must be a Flutter asset path, e.g.
-  ///   `'assets/models/yolo11n_int8.tflite'`
-  /// [labels] is the ordered class-name list.
-  /// [delegate] is `'gpu'` (default), `'nnapi'`, or `'cpu'`.
+  /// [modelPath] — Flutter asset path, e.g. `'assets/models/yolo11n_int8.tflite'`
+  /// [labels]    — ordered class-name list.
+  /// [delegate]  — `'gpu'` (default), `'nnapi'`, or `'cpu'`.
   Future<void> loadModel({
     required String modelPath,
     required List<String> labels,
@@ -36,10 +37,14 @@ class NativeDetectionBridge {
     });
   }
 
-  /// Start the native CameraX pipeline.  Detections will flow through
-  /// [detectionStream] immediately after this returns.
-  Future<void> startCamera() async {
-    await _method.invokeMethod<bool>('startCamera');
+  /// Start the native CameraX pipeline.
+  ///
+  /// Returns the Flutter **texture ID** that can be passed to a [Texture]
+  /// widget to display the camera preview with zero pixel copies.
+  /// Detections will begin flowing through [detectionStream] immediately.
+  Future<int> startCamera() async {
+    final id = await _method.invokeMethod<int>('startCamera');
+    return id ?? -1;
   }
 
   /// Stop the camera (inference stops too).
@@ -68,7 +73,7 @@ class NativeDetectionBridge {
 /// One frame worth of results sent from Kotlin to Dart.
 class NativeFrame {
   final List<Detection> detections;
-  final int inferMs;
+  final int    inferMs;
   final double fps;
 
   const NativeFrame({
@@ -86,8 +91,8 @@ class NativeFrame {
 
     return NativeFrame(
       detections: detections,
-      inferMs: (map['inferMs'] as num?)?.toInt() ?? 0,
-      fps: (map['fps'] as num?)?.toDouble() ?? 0.0,
+      inferMs:    (map['inferMs'] as num?)?.toInt()    ?? 0,
+      fps:        (map['fps']     as num?)?.toDouble() ?? 0.0,
     );
   }
 }

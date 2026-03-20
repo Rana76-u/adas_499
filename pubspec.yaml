@@ -13,10 +13,7 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
-  # Camera (used only by the image-picker tab now; live camera uses native CameraX)
-  camera: ^0.10.5
-
-  # Still-image decoding for the image tab
+  # Still-image decoding for the image tab (not used in the live camera path)
   image: ^3.3.0
 
   # Image picker (gallery / camera capture for static image tab)
@@ -28,9 +25,6 @@ dependencies:
   # Permissions
   permission_handler: ^11.3.0
 
-  # State management (if used elsewhere)
-  flutter_riverpod: ^2.5.1
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -40,7 +34,7 @@ flutter:
   uses-material-design: true
 
   assets:
+    # All TFLite models — the native Kotlin code loads these via AssetManager
     - assets/models/
-    - assets/models/yolo11n_int8.tflite
-    - android/app/src/main/assets/models/yolo11n_int8.tflite
+    # Labels file
     - assets/labels.txt
