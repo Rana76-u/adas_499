@@ -27,10 +27,9 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await _model.load(
         modelPath:
-            'assets/models/best_float32_640.tflite', //yolov8n  best_float16_640
-        labels: customLabels,
-
-        ///cocoLabels
+            'assets/models/yolo11n_int8.tflite', //yolov8n  best_float16_640
+        labels: cocoLabels, //customLabels
+        delegate: YoloDelegate.nnapi,
       );
       if (mounted) setState(() => _modelLoaded = true);
     } catch (e) {

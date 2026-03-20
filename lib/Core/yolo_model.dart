@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
@@ -82,11 +83,40 @@ class _LetterboxResult {
   });
 }
 
+/// Delegate / accelerator selection for YOLO.
+enum YoloDelegate { cpu, nnapi, gpu }
+
+InterpreterOptions createYoloInterpreterOptions({
+  int threads = 4,
+  YoloDelegate delegate = YoloDelegate.cpu,
+}) {
+  final options = InterpreterOptions()..threads = threads;
+
+  if (Platform.isAndroid) {
+    switch (delegate) {
+      case YoloDelegate.nnapi:
+        options.useNnApiForAndroid = true;
+        break;
+      case YoloDelegate.gpu:
+        options.addDelegate(GpuDelegateV2());
+        break;
+      case YoloDelegate.cpu:
+        // Default CPU path, nothing extra.
+        break;
+    }
+  }
+
+  return options;
+}
+
 /// YOLOv8 TFLite inference helper
 class YoloModel {
   static const int inputSize = 640;
-  static const double confThreshold = 0.45;
+  static const double confThreshold = 0.60;
   static const double iouThreshold = 0.45;
+  static const double _minBoxSide = 0.03;
+  static const double _minBoxArea = 0.002;
+  static const double _maxBoxArea = 0.90;
 
   // Ultralytics letterbox fill colour — MUST match training preprocessing
   static const int _padValue = 114;
@@ -94,24 +124,47 @@ class YoloModel {
   Interpreter? _interpreter;
   List<String> _labels = [];
   bool _isLoaded = false;
+  String? _modelPath;
+  YoloDelegate _delegate = YoloDelegate.cpu;
+
+  YoloModel();
+
+  YoloModel.fromInterpreter({
+    required Interpreter interpreter,
+    required List<String> labels,
+  }) {
+    _interpreter = interpreter;
+    _labels = labels;
+    _isLoaded = true;
+  }
 
   bool get isLoaded => _isLoaded;
   List<String> get labels => _labels;
+  String? get modelPath => _modelPath;
+  YoloDelegate get delegate => _delegate;
 
   // ── Load ──────────────────────────────────────────────────────────────────
 
   Future<void> load({
     required String modelPath,
     required List<String> labels,
+    YoloDelegate delegate = YoloDelegate.cpu,
+    int threads = 4,
   }) async {
     try {
-      final options = InterpreterOptions()..threads = 4;
+      final options = createYoloInterpreterOptions(
+        threads: threads,
+        delegate: delegate,
+      );
       _interpreter = await Interpreter.fromAsset(modelPath, options: options);
       _labels = labels;
+      _modelPath = modelPath;
+      _delegate = delegate;
       _isLoaded = true;
       debugPrint(
         '✅ YOLO loaded. '
-        'Input: ${_interpreter!.getInputTensors().first.shape}',
+        'Input: ${_interpreter!.getInputTensors().first.shape}, '
+        'Output: ${_interpreter!.getOutputTensors().first.shape}',
       );
     } catch (e) {
       debugPrint('❌ Failed to load model: $e');
@@ -129,26 +182,22 @@ class YoloModel {
     // 1) Letterbox
     final lb = _letterbox(image);
 
-    // 2) Flat float buffer
-    final flat = _toFloat32Input(lb.image); // length = 640*640*3
-
     // 3) Get input shape from interpreter
     final inputTensor = _interpreter!.getInputTensor(0);
     final shape = inputTensor.shape; // expect [1, 640, 640, 3]
     final b = shape[0], h = shape[1], w = shape[2], c = shape[3];
 
-    // 4) Build 4‑D nested list [b][h][w][c]
-    int idx = 0;
-    final input4d = List.generate(
-      b,
-      (_) => List.generate(
-        h,
-        (_) => List.generate(
-          w,
-          (_) => List.generate(c, (_) => flat[idx++].toDouble()),
-        ),
+    // 4) Build typed input and reshape (avoid allocating huge nested lists)
+    final Object input = switch (inputTensor.type) {
+      TensorType.float32 => _toFloat32Input(lb.image).reshape([b, h, w, c]),
+      TensorType.uint8 || TensorType.int8 => _toQuantizedInput(
+        lb.image,
+        inputTensor,
+      ).reshape([b, h, w, c]),
+      _ => throw UnsupportedError(
+        'Unsupported input tensor type: ${inputTensor.type}',
       ),
-    );
+    };
 
     // 5) Allocate output from actual tensor shape (you already do this)
     final outShape = _interpreter!.getOutputTensor(0).shape;
@@ -158,7 +207,7 @@ class YoloModel {
     );
 
     // 6) Run
-    _interpreter!.run(input4d, outputBuffer);
+    _interpreter!.run(input, outputBuffer);
 
     // 7) Decode as before
     return _decodeOutput(
@@ -236,6 +285,30 @@ class YoloModel {
     return buffer;
   }
 
+  Uint8List _toQuantizedInput(img.Image image, Tensor inputTensor) {
+    final params = inputTensor.params;
+    final scale = params.scale == 0 ? 1.0 : params.scale;
+    final zeroPoint = params.zeroPoint;
+
+    final buffer = Uint8List(inputSize * inputSize * 3);
+    int idx = 0;
+    for (int y = 0; y < inputSize; y++) {
+      for (int x = 0; x < inputSize; x++) {
+        final pixel = image.getPixel(x, y);
+        buffer[idx++] = _quantize(img.getRed(pixel), scale, zeroPoint);
+        buffer[idx++] = _quantize(img.getGreen(pixel), scale, zeroPoint);
+        buffer[idx++] = _quantize(img.getBlue(pixel), scale, zeroPoint);
+      }
+    }
+    return buffer;
+  }
+
+  int _quantize(int channel0to255, double scale, int zeroPoint) {
+    final normalized = channel0to255 / 255.0;
+    final q = (normalized / scale + zeroPoint).round();
+    return q.clamp(0, 255);
+  }
+
   // ── Step 5: Decode output + unscale boxes ─────────────────────────────────
   //
   // YOLOv8 raw output layout: [4 + numClasses, 8400]
@@ -262,6 +335,20 @@ class YoloModel {
     final numClasses = _labels.length;
     final numAnchors = output[0].length; // 8400
     final rawDets = <_RawDetection>[];
+
+    // Validate output dimensions
+    final expectedRows = 4 + numClasses;
+    if (output.length < expectedRows) {
+      throw StateError(
+        'Output tensor has insufficient rows. '
+        'Expected at least $expectedRows (4 bbox + $numClasses classes), got ${output.length}. '
+        'This suggests the model output format is incompatible.',
+      );
+    }
+
+    debugPrint(
+      'Model output: ${output.length} rows, ${output[0].length} anchors, $numClasses classes',
+    );
 
     for (int a = 0; a < numAnchors; a++) {
       // ── Find best class ──────────────────────────────────────────────────
@@ -299,6 +386,8 @@ class YoloModel {
       final right = (lbX2 - padLeft) / (scale * origW);
       final bottom = (lbY2 - padTop) / (scale * origH);
 
+      if (!_isValidBox(left, top, right, bottom)) continue;
+
       rawDets.add(
         _RawDetection(
           left: left,
@@ -330,6 +419,29 @@ class YoloModel {
         ),
       );
     }).toList();
+  }
+
+  bool _isValidBox(double left, double top, double right, double bottom) {
+    if (!left.isFinite ||
+        !top.isFinite ||
+        !right.isFinite ||
+        !bottom.isFinite) {
+      return false;
+    }
+
+    final clampedLeft = left.clamp(0.0, 1.0);
+    final clampedTop = top.clamp(0.0, 1.0);
+    final clampedRight = right.clamp(0.0, 1.0);
+    final clampedBottom = bottom.clamp(0.0, 1.0);
+
+    final width = clampedRight - clampedLeft;
+    final height = clampedBottom - clampedTop;
+    if (width <= 0 || height <= 0) return false;
+    if (width < _minBoxSide || height < _minBoxSide) return false;
+
+    final area = width * height;
+    if (area < _minBoxArea || area > _maxBoxArea) return false;
+    return true;
   }
 
   // ── NMS (greedy, per-class) ───────────────────────────────────────────────
@@ -411,4 +523,87 @@ const List<String> customLabels = [
   'other-vehicle',
   'person',
   'rickshaw',
+];
+
+const List<String> cocoLabels = [
+  'person',
+  'bicycle',
+  'car',
+  'motorcycle',
+  'airplane',
+  'bus',
+  'train',
+  'truck',
+  'boat',
+  'traffic light',
+  'fire hydrant',
+  'stop sign',
+  'parking meter',
+  'bench',
+  'bird',
+  'cat',
+  'dog',
+  'horse',
+  'sheep',
+  'cow',
+  'elephant',
+  'bear',
+  'zebra',
+  'giraffe',
+  'backpack',
+  'umbrella',
+  'handbag',
+  'tie',
+  'suitcase',
+  'frisbee',
+  'skis',
+  'snowboard',
+  'sports ball',
+  'kite',
+  'baseball bat',
+  'baseball glove',
+  'skateboard',
+  'surfboard',
+  'tennis racket',
+  'bottle',
+  'wine glass',
+  'cup',
+  'fork',
+  'knife',
+  'spoon',
+  'bowl',
+  'banana',
+  'apple',
+  'sandwich',
+  'orange',
+  'broccoli',
+  'carrot',
+  'hot dog',
+  'pizza',
+  'donut',
+  'cake',
+  'chair',
+  'couch',
+  'potted plant',
+  'bed',
+  'dining table',
+  'toilet',
+  'tv',
+  'laptop',
+  'mouse',
+  'remote',
+  'keyboard',
+  'cell phone',
+  'microwave',
+  'oven',
+  'toaster',
+  'sink',
+  'refrigerator',
+  'book',
+  'clock',
+  'vase',
+  'scissors',
+  'teddy bear',
+  'hair drier',
+  'toothbrush',
 ];
