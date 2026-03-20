@@ -2,6 +2,7 @@ import 'package:adas_499/Features/Live%20Camera%20Screen/camera_screen.dart';
 import 'package:adas_499/Features/Home%20Screen/presentation/image_screen.dart';
 import 'package:adas_499/Shared/custom_appbar.dart';
 import 'package:flutter/material.dart';
+import 'package:adas_499/Core/native_detection_bridge.dart';
 import 'package:adas_499/Core/yolo_model.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -12,7 +13,9 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final YoloModel _model = YoloModel();
+  // The bridge owns all native resources (interpreter, camera, delegates).
+  final NativeDetectionBridge _bridge = NativeDetectionBridge();
+
   bool _modelLoaded = false;
   String? _loadError;
   int _selectedTab = 0;
@@ -25,11 +28,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadModel() async {
     try {
-      await _model.load(
+      await _bridge.loadModel(
         modelPath:
-            'assets/models/yolo11n_int8.tflite', //yolov8n  best_float16_640
-        labels: cocoLabels, //customLabels
-        delegate: YoloDelegate.nnapi,
+            'assets/models/yolo11n_int8.tflite', //yolo11n_int8 //android/app/src/main/
+        labels: cocoLabels, // swap to cocoLabels if using a COCO model
+        delegate: 'gpu', // 'gpu' | 'nnapi' | 'cpu'
       );
       if (mounted) setState(() => _modelLoaded = true);
     } catch (e) {
@@ -37,7 +40,7 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(
           () => _loadError =
               'Failed to load model.\n\n'
-              'Make sure yolov8n.tflite is in assets/models/\n\n'
+              'Make sure the .tflite file is listed in pubspec assets.\n\n'
               'Error: $e',
         );
       }
@@ -46,7 +49,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    _model.dispose();
+    _bridge.dispose();
     super.dispose();
   }
 
@@ -117,12 +120,12 @@ class _HomeScreenState extends State<HomeScreen> {
             CircularProgressIndicator(color: Color(0xFF1A73E8)),
             SizedBox(height: 20),
             Text(
-              'Loading YOLOv8 model…',
+              'Loading model on device…',
               style: TextStyle(color: Colors.white70, fontSize: 15),
             ),
             SizedBox(height: 8),
             Text(
-              'This may take a moment',
+              'Initialising GPU/NNAPI delegate',
               style: TextStyle(color: Colors.white38, fontSize: 12),
             ),
           ],
@@ -133,8 +136,10 @@ class _HomeScreenState extends State<HomeScreen> {
     return IndexedStack(
       index: _selectedTab,
       children: [
-        ImageDetectionScreen(model: _model),
-        LiveCameraScreen(model: _model),
+        // Image tab still works the same way
+        ImageDetectionScreen(bridge: _bridge),
+        // Live camera tab now uses the native pipeline
+        LiveCameraScreen(bridge: _bridge),
       ],
     );
   }
