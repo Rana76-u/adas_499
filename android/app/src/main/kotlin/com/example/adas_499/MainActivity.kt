@@ -3,10 +3,8 @@ package com.example.adas_499
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.ImageFormat
-import android.graphics.Matrix
+import android.graphics.BitmapFactory
 import android.util.Log
-import android.util.Size
 import android.view.Surface
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -34,36 +32,41 @@ import kotlin.math.min
 class MainActivity : FlutterActivity() {
 
     companion object {
-        private const val TAG             = "ADAS_Native"
-        private const val METHOD_CHANNEL  = "com.example.adas_499/control"
-        private const val EVENT_CHANNEL   = "com.example.adas_499/detections"
-        private const val PREVIEW_CHANNEL = "com.example.adas_499/preview"
+        private const val TAG                  = "ADAS_Native"
+        private const val METHOD_CHANNEL       = "com.example.adas_499/control"
+        private const val EVENT_CHANNEL        = "com.example.adas_499/detections"
 
-        private const val INPUT_SIZE   = 640
-        private const val CONF_THRESH  = 0.40f   // slightly lower → catch more objects
-        private const val IOU_THRESH   = 0.45f
-        private const val PAD_VALUE    = 114
-        private const val JPEG_QUALITY = 85      // used nowhere now — kept for reference
+        private const val INPUT_SIZE           = 640
+        private const val CONF_THRESH          = 0.40f
+        private const val IOU_THRESH           = 0.45f
+        private const val PAD_VALUE            = 114
+
+        // Throttle event-channel sends — inference still runs every frame.
+        private const val MIN_SEND_INTERVAL_MS = 80L
+
+        // EMA smoothing factor for FPS — must be in companion to use const val
+        private const val EMA_ALPHA            = 0.1
     }
 
     // ── Channels ──────────────────────────────────────────────────────────────
     private var eventSink: EventChannel.EventSink? = null
 
     // ── TFLite ────────────────────────────────────────────────────────────────
-    private var interpreter: Interpreter? = null
-    private var gpuDelegate: GpuDelegate?   = null
+    private var interpreter: Interpreter?     = null
+    private var gpuDelegate: GpuDelegate?     = null
     private var nnApiDelegate: NnApiDelegate? = null
-    private var labels: List<String>         = emptyList()
-    private var numClasses                   = 0
-    private var isFloat32Model               = true
+    private var labels: List<String>          = emptyList()
+    private var numClasses                    = 0
+    private var isFloat32Model                = true
 
-    // Pre-allocated buffers — never reallocated after loadModel()
-    private var inputBuffer: ByteBuffer?              = null   // NHWC float32 or uint8
-    private var outputBuffer: Array<Array<FloatArray>>? = null // [1][4+C][8400]
+    // Pre-allocated I/O buffers (never reallocated after loadModel)
+    private var inputBuffer:  ByteBuffer?               = null
+    private var outputBuffer: Array<Array<FloatArray>>? = null
 
-    // Reusable bitmaps — allocated once, reused every frame
-    private var letterboxBitmap: Bitmap? = null   // 640×640 scratchpad
-    private var pixelScratch:    IntArray? = null  // INPUT_SIZE*INPUT_SIZE ints
+    // Reusable bitmaps — eliminate per-frame GC pressure
+    private var letterboxBitmap: Bitmap?   = null
+    private var pixelScratch:    IntArray? = null
+    private var rgbScratch:      Bitmap?   = null
 
     // ── Camera ────────────────────────────────────────────────────────────────
     private var cameraProvider: ProcessCameraProvider? = null
@@ -74,12 +77,17 @@ class MainActivity : FlutterActivity() {
 
     // ── State ─────────────────────────────────────────────────────────────────
     @Volatile private var isRunning  = false
-    @Volatile private var frameReady = true   // simple frame-drop gate
+    @Volatile private var frameReady = true
 
-    // FPS: exponential moving average — stable and cheap
     private var lastFrameMs: Long = 0L
-    private var emaFps: Double    = 0.0
-    private val EMA_ALPHA         = 0.1   // smoothing factor
+    private var emaFps: Double    = 0.0   // mutable — not const
+    private var lastSendMs: Long  = 0L
+
+    // Pre-allocated letterbox canvas and paint objects (no per-frame allocation)
+    private var lbCanvas: android.graphics.Canvas? = null
+    private val lbPaint  = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+    private val lbDst    = android.graphics.RectF()
+    private val padColor = android.graphics.Color.rgb(PAD_VALUE, PAD_VALUE, PAD_VALUE)
 
     // ─────────────────────────────────────────────────────────────────────────
     // Flutter engine setup
@@ -88,16 +96,13 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // Register a Flutter texture for the camera preview
         flutterSurfaceTextureEntry = flutterEngine.renderer.createSurfaceTexture()
         val surfaceTexture = flutterSurfaceTextureEntry!!.surfaceTexture()
 
-        // Tell CameraX to render to this surface texture (set resolution lazily)
         previewSurfaceProvider = Preview.SurfaceProvider { request ->
             val surface = Surface(surfaceTexture)
             surfaceTexture.setDefaultBufferSize(
-                request.resolution.width, request.resolution.height
-            )
+                request.resolution.width, request.resolution.height)
             request.provideSurface(surface, ContextCompat.getMainExecutor(this)) {}
         }
 
@@ -125,31 +130,39 @@ class MainActivity : FlutterActivity() {
                             result.error("NO_PERMISSION", "Camera permission not granted", null)
                         } else {
                             startCamera()
-                            // Return the Flutter texture ID so Dart can show Texture(id)
                             result.success(flutterSurfaceTextureEntry!!.id())
                         }
                     }
-                    "stopCamera" -> {
-                        stopCamera()
-                        result.success(true)
+                    "stopCamera" -> { stopCamera(); result.success(true) }
+                    "dispose"    -> { disposeAll(); result.success(true) }
+
+                    // Still-image inference — offloaded to cameraExecutor
+                    "runOnImage" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("BAD_ARG", "path is null", null)
+                        } else {
+                            cameraExecutor.execute {
+                                try {
+                                    val dets = runInferenceOnImagePath(path)
+                                    runOnUiThread { result.success(dets) }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "runOnImage error: ${e.message}", e)
+                                    runOnUiThread { result.error("INFER_ERROR", e.message, null) }
+                                }
+                            }
+                        }
                     }
-                    "dispose" -> {
-                        disposeAll()
-                        result.success(true)
-                    }
+
                     else -> result.notImplemented()
                 }
             }
 
-        // ── Event channel (detection stream → Dart) ───────────────────────────
+        // ── Event channel ─────────────────────────────────────────────────────
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL)
             .setStreamHandler(object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) {
-                    eventSink = sink
-                }
-                override fun onCancel(arguments: Any?) {
-                    eventSink = null
-                }
+                override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) { eventSink = sink }
+                override fun onCancel(arguments: Any?) { eventSink = null }
             })
     }
 
@@ -157,29 +170,29 @@ class MainActivity : FlutterActivity() {
     // Model loading
     // ─────────────────────────────────────────────────────────────────────────
     private fun loadModel(assetPath: String, labelList: List<String>, delegatePref: String) {
-        // Release any previous session
-        interpreter?.close();   interpreter   = null
-        gpuDelegate?.close();   gpuDelegate   = null
-        nnApiDelegate?.close(); nnApiDelegate = null
+        interpreter?.close();    interpreter   = null
+        gpuDelegate?.close();    gpuDelegate   = null
+        nnApiDelegate?.close();  nnApiDelegate = null
 
         labels     = labelList
         numClasses = labelList.size
 
-        // ── Load model bytes from Flutter assets ──────────────────────────────
         val modelBuffer = loadModelBuffer(assetPath)
 
-        // ── Build interpreter options with best available delegate ────────────
         val options = Interpreter.Options().apply {
-            numThreads = 4
+            numThreads = 2   // 2 > 4 on mobile; GPU/NNAPI ignores this anyway
             when (delegatePref.lowercase()) {
                 "gpu" -> {
                     val compatList = CompatibilityList()
                     if (compatList.isDelegateSupportedOnThisDevice) {
+                        // Use plain GpuDelegate() — bestOptionsForThisDevice returns
+                        // GpuDelegateFactory.Options which is not on the classpath
+                        // with tensorflow-lite-gpu:2.x without the delegate-plugin AAR.
                         gpuDelegate = GpuDelegate()
                         addDelegate(gpuDelegate!!)
                         Log.i(TAG, "✅ GPU delegate active")
                     } else {
-                        Log.w(TAG, "⚠️ GPU not supported → falling back to NNAPI")
+                        Log.w(TAG, "⚠️ GPU not supported → NNAPI fallback")
                         nnApiDelegate = NnApiDelegate()
                         addDelegate(nnApiDelegate!!)
                     }
@@ -189,61 +202,51 @@ class MainActivity : FlutterActivity() {
                     addDelegate(nnApiDelegate!!)
                     Log.i(TAG, "✅ NNAPI delegate active")
                 }
-                else -> Log.i(TAG, "ℹ️ CPU path with $numThreads threads")
+                else -> Log.i(TAG, "ℹ️ CPU with 2 threads")
             }
         }
 
         interpreter = Interpreter(modelBuffer, options)
 
-        // ── Inspect input tensor ──────────────────────────────────────────────
         val inputTensor = interpreter!!.getInputTensor(0)
         isFloat32Model  = (inputTensor.dataType() == DataType.FLOAT32)
         Log.i(TAG, "Input shape: ${inputTensor.shape().contentToString()}  " +
             "dtype=${if (isFloat32Model) "float32" else "int8/uint8"}")
 
-        // ── Pre-allocate reusable I/O buffers (ONCE, never again) ─────────────
         val bytesPerElem = if (isFloat32Model) 4 else 1
         inputBuffer = ByteBuffer
             .allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * bytesPerElem)
             .apply { order(ByteOrder.nativeOrder()) }
 
-        // YOLO output: [1, 4+numClasses, 8400]
         outputBuffer = Array(1) { Array(4 + numClasses) { FloatArray(8400) } }
 
-        // Pre-allocate scratch bitmaps so letterboxing never allocs at runtime
         letterboxBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+        lbCanvas        = android.graphics.Canvas(letterboxBitmap!!)
         pixelScratch    = IntArray(INPUT_SIZE * INPUT_SIZE)
 
         Log.i(TAG, "✅ Model ready. classes=$numClasses  float32=$isFloat32Model")
     }
 
-    /** Try several paths to locate the model in Android's asset system. */
     private fun loadModelBuffer(assetPath: String): java.nio.MappedByteBuffer {
-        // Path 1: Flutter asset path as-is (e.g. "assets/models/foo.tflite")
         try {
             return assets.openFd(assetPath).use { afd ->
                 FileInputStream(afd.fileDescriptor).channel.map(
-                    FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength
-                )
+                    FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
             }
-        } catch (_: Exception) { Log.w(TAG, "openFd failed for $assetPath, trying stripped path") }
+        } catch (_: Exception) {}
 
-        // Path 2: Strip leading "assets/" — Android merges Flutter assets into root
         val androidPath = assetPath.removePrefix("assets/")
         try {
             return assets.openFd(androidPath).use { afd ->
                 FileInputStream(afd.fileDescriptor).channel.map(
-                    FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength
-                )
+                    FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
             }
-        } catch (_: Exception) { Log.w(TAG, "openFd failed for $androidPath, using stream copy") }
+        } catch (_: Exception) {}
 
-        // Path 3: Stream copy to cache (slowest but always works)
         val tmpFile = java.io.File(cacheDir, "model_tmp.tflite")
         assets.open(androidPath).use { it.copyTo(tmpFile.outputStream()) }
         return FileInputStream(tmpFile).channel.map(
-            FileChannel.MapMode.READ_ONLY, 0, tmpFile.length()
-        )
+            FileChannel.MapMode.READ_ONLY, 0, tmpFile.length())
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -261,13 +264,11 @@ class MainActivity : FlutterActivity() {
     private fun bindCamera(provider: ProcessCameraProvider) {
         provider.unbindAll()
 
-        // ── Preview use-case → renders to the Flutter texture ─────────────────
         previewUseCase = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .build()
             .also { it.setSurfaceProvider(previewSurfaceProvider) }
 
-        // ── Analysis use-case → runs inference ───────────────────────────────
         val imageAnalysis = ImageAnalysis.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -289,9 +290,8 @@ class MainActivity : FlutterActivity() {
                 this as LifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 previewUseCase!!,
-                imageAnalysis
-            )
-            Log.i(TAG, "✅ Camera bound (preview + analysis)")
+                imageAnalysis)
+            Log.i(TAG, "✅ Camera bound")
         } catch (e: Exception) {
             Log.e(TAG, "Camera bind failed: ${e.message}", e)
         }
@@ -309,44 +309,47 @@ class MainActivity : FlutterActivity() {
         try {
             val t0 = System.currentTimeMillis()
 
-            // ── 1. YUV → RGB bitmap (zero JPEG roundtrip) ─────────────────────
-            val rgbBitmap = yuvToRgbBitmap(imageProxy)
+            // 1. YUV → RGB (reuses scratchpad bitmap)
+            yuvToRgbInPlace(imageProxy)
 
-            // ── 2. Letterbox into pre-allocated 640×640 scratch bitmap ─────────
-            val (scale, padLeft, padTop) = letterboxInPlace(rgbBitmap)
+            // 2. Letterbox into pre-allocated 640×640 (rotation baked into draw)
+            val rotation = imageProxy.imageInfo.rotationDegrees
+            val (scale, padLeft, padTop) = letterboxBitmapInPlace(rgbScratch!!, rotation)
 
-            // ── 3. Fill TFLite input buffer from scratch bitmap ────────────────
+            // 3. Fill TFLite input buffer
             fillInputBuffer(letterboxBitmap!!)
 
-            // ── 4. Run inference ──────────────────────────────────────────────
+            // 4. Run inference
             val out = outputBuffer!!
-            for (row in out[0]) row.fill(0f)          // zero output in-place
+            for (row in out[0]) row.fill(0f)
             interpreter!!.run(inputBuffer!!, out)
 
-            // ── 5. Decode + NMS ───────────────────────────────────────────────
-            val dets = decodeOutput(
-                out[0], scale, padLeft, padTop,
-                rgbBitmap.width, rgbBitmap.height
-            )
+            // 5. Determine original display dimensions after rotation
+            val srcW = if (rotation % 180 == 0) imageProxy.width  else imageProxy.height
+            val srcH = if (rotation % 180 == 0) imageProxy.height else imageProxy.width
 
+            // 6. Decode + NMS
+            val dets    = decodeOutput(out[0], scale, padLeft, padTop, srcW, srcH)
             val inferMs = System.currentTimeMillis() - t0
 
-            // ── 6. EMA FPS ────────────────────────────────────────────────────
+            // 7. EMA FPS
             val nowMs = System.currentTimeMillis()
             if (lastFrameMs > 0L) {
                 val instantFps = 1000.0 / (nowMs - lastFrameMs).toDouble().coerceAtLeast(1.0)
                 emaFps = if (emaFps == 0.0) instantFps
-                         else EMA_ALPHA * instantFps + (1 - EMA_ALPHA) * emaFps
+                         else EMA_ALPHA * instantFps + (1.0 - EMA_ALPHA) * emaFps
             }
             lastFrameMs = nowMs
 
-            // ── 7. Send to Flutter on main thread ─────────────────────────────
-            val payload = mapOf(
-                "detections" to dets,
-                "inferMs"    to inferMs,
-                "fps"        to emaFps
-            )
-            runOnUiThread { eventSink?.success(payload) }
+            // 8. Throttled send — avoids flooding Dart event loop
+            if (nowMs - lastSendMs >= MIN_SEND_INTERVAL_MS) {
+                lastSendMs = nowMs
+                val payload = mapOf(
+                    "detections" to dets,
+                    "inferMs"    to inferMs,
+                    "fps"        to emaFps)
+                runOnUiThread { eventSink?.success(payload) }
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "processFrame error: ${e.message}", e)
@@ -358,14 +361,82 @@ class MainActivity : FlutterActivity() {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // YUV_420_888 → RGB Bitmap  (direct, no JPEG roundtrip)
-    //
-    // Handles the common planar YUV case (I420 and NV12/NV21 variants).
-    // Falls back to a single-pixel slow path only if strides are unusual.
+    // Still-image inference
     // ─────────────────────────────────────────────────────────────────────────
-    private fun yuvToRgbBitmap(imageProxy: ImageProxy): Bitmap {
+    private fun runInferenceOnImagePath(path: String): List<Map<String, Any>> {
+        val interp = interpreter ?: error("Model not loaded")
+
+        val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+        val raw  = BitmapFactory.decodeFile(path, opts)
+            ?: error("Cannot decode image at $path")
+
+        val lbBmp  = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(lbBmp)
+
+        val scale   = INPUT_SIZE.toFloat() / max(raw.width, raw.height)
+        val newW    = (raw.width  * scale).toInt()
+        val newH    = (raw.height * scale).toInt()
+        val padLeft = (INPUT_SIZE - newW) / 2
+        val padTop  = (INPUT_SIZE - newH) / 2
+
+        canvas.drawColor(padColor)
+        canvas.drawBitmap(raw, null,
+            android.graphics.RectF(padLeft.toFloat(), padTop.toFloat(),
+                (padLeft + newW).toFloat(), (padTop + newH).toFloat()), lbPaint)
+        raw.recycle()
+
+        val bytesPerElem = if (isFloat32Model) 4 else 1
+        val iBuf = ByteBuffer
+            .allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * bytesPerElem)
+            .apply { order(ByteOrder.nativeOrder()) }
+
+        val px = IntArray(INPUT_SIZE * INPUT_SIZE)
+        lbBmp.getPixels(px, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        lbBmp.recycle()
+
+        if (isFloat32Model) {
+            val inv255 = 1f / 255f
+            for (p in px) {
+                iBuf.putFloat(((p shr 16) and 0xFF) * inv255)
+                iBuf.putFloat(((p shr  8) and 0xFF) * inv255)
+                iBuf.putFloat(( p         and 0xFF) * inv255)
+            }
+        } else {
+            for (p in px) {
+                iBuf.put(((p shr 16) and 0xFF).toByte())
+                iBuf.put(((p shr  8) and 0xFF).toByte())
+                iBuf.put(( p         and 0xFF).toByte())
+            }
+        }
+
+        val oBuf = Array(1) { Array(4 + numClasses) { FloatArray(8400) } }
+        for (row in oBuf[0]) row.fill(0f)
+        interp.run(iBuf, oBuf)
+
+        // origW/origH in terms of the raw image (before scale)
+        val origW = raw.width   // raw was recycled but dimensions are captured by scale
+        val origH = raw.height
+        // Recalculate from scale: origW = (INPUT_SIZE - 2*padLeft) / scale
+        val realOrigW = ((INPUT_SIZE - 2 * padLeft) / scale).toInt().coerceAtLeast(1)
+        val realOrigH = ((INPUT_SIZE - 2 * padTop)  / scale).toInt().coerceAtLeast(1)
+
+        return decodeOutput(oBuf[0], scale, padLeft, padTop, realOrigW, realOrigH)
+            .also { Log.d(TAG, "runOnImage → ${it.size} detections") }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // YUV_420_888 → RGB in-place (reuses rgbScratch Bitmap)
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun yuvToRgbInPlace(imageProxy: ImageProxy) {
         val width  = imageProxy.width
         val height = imageProxy.height
+
+        if (rgbScratch == null ||
+            rgbScratch!!.width != width ||
+            rgbScratch!!.height != height) {
+            rgbScratch?.recycle()
+            rgbScratch = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        }
 
         val yPlane = imageProxy.planes[0]
         val uPlane = imageProxy.planes[1]
@@ -375,83 +446,77 @@ class MainActivity : FlutterActivity() {
         val uBuf = uPlane.buffer
         val vBuf = vPlane.buffer
 
-        val yRowStride = yPlane.rowStride
-        val uvRowStride = uPlane.rowStride
-        val uvPixelStride = uPlane.pixelStride   // 1 = planar I420, 2 = semi-planar NV12/NV21
+        val yRowStride    = yPlane.rowStride
+        val uvRowStride   = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
 
-        val yData  = ByteArray(yBuf.remaining()).also { yBuf.get(it) }
-        val uData  = ByteArray(uBuf.remaining()).also { uBuf.get(it) }
-        val vData  = ByteArray(vBuf.remaining()).also { vBuf.get(it) }
+        val yData = ByteArray(yBuf.remaining()).also { yBuf.get(it) }
+        val uData = ByteArray(uBuf.remaining()).also { uBuf.get(it) }
+        val vData = ByteArray(vBuf.remaining()).also { vBuf.get(it) }
 
-        val pixels = IntArray(width * height)
+        // Reuse pixelScratch if big enough (allocated for INPUT_SIZE²)
+        val pixels = if (width * height <= (pixelScratch?.size ?: 0))
+            pixelScratch!! else IntArray(width * height)
 
         for (row in 0 until height) {
             val uvRow = row shr 1
             for (col in 0 until width) {
                 val uvCol = col shr 1
-
                 val yIdx  = row * yRowStride + col
                 val uvIdx = uvRow * uvRowStride + uvCol * uvPixelStride
 
-                val y = (yData[yIdx].toInt() and 0xFF)
+                val y = yData[yIdx].toInt() and 0xFF
                 val u = (uData[uvIdx].toInt() and 0xFF) - 128
                 val v = (vData[uvIdx].toInt() and 0xFF) - 128
 
-                // BT.601 integer approximation
                 val r = (y + 1.402f * v).toInt().coerceIn(0, 255)
                 val g = (y - 0.344f * u - 0.714f * v).toInt().coerceIn(0, 255)
                 val b = (y + 1.772f * u).toInt().coerceIn(0, 255)
-
                 pixels[row * width + col] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
 
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-
-        // Rotate to upright orientation
-        val rotation = imageProxy.imageInfo.rotationDegrees
-        return if (rotation != 0) {
-            val m = Matrix().apply { postRotate(rotation.toFloat()) }
-            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
-            bitmap.recycle()
-            rotated
-        } else {
-            bitmap
-        }
+        rgbScratch!!.setPixels(pixels, 0, width, 0, 0, width, height)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Letterbox — draws into the pre-allocated 640×640 bitmap in-place.
-    // Returns (scale, padLeft, padTop) for bounding-box unscaling.
+    // Letterbox into the pre-allocated 640×640 bitmap.
+    // Bakes rotation into the canvas draw — no intermediate copy needed.
     // ─────────────────────────────────────────────────────────────────────────
     private data class LetterboxMeta(val scale: Float, val padLeft: Int, val padTop: Int)
 
-    private fun letterboxInPlace(src: Bitmap): LetterboxMeta {
-        val scale  = INPUT_SIZE.toFloat() / max(src.width, src.height)
-        val newW   = (src.width  * scale).toInt()
-        val newH   = (src.height * scale).toInt()
+    private fun letterboxBitmapInPlace(src: Bitmap, rotationDegrees: Int): LetterboxMeta {
+        val canvas = lbCanvas!!
+        val displayW = if (rotationDegrees % 180 == 0) src.width  else src.height
+        val displayH = if (rotationDegrees % 180 == 0) src.height else src.width
+
+        val scale   = INPUT_SIZE.toFloat() / max(displayW, displayH)
+        val newW    = (displayW * scale).toInt()
+        val newH    = (displayH * scale).toInt()
         val padLeft = (INPUT_SIZE - newW) / 2
         val padTop  = (INPUT_SIZE - newH) / 2
 
-        val canvas = android.graphics.Canvas(letterboxBitmap!!)
-        // Fill padding area with grey (114,114,114)
-        canvas.drawColor(android.graphics.Color.rgb(PAD_VALUE, PAD_VALUE, PAD_VALUE))
-        // Draw scaled source
-        val dst = android.graphics.RectF(
-            padLeft.toFloat(), padTop.toFloat(),
-            (padLeft + newW).toFloat(), (padTop + newH).toFloat()
-        )
-        canvas.drawBitmap(src, null, dst, null)
+        canvas.drawColor(padColor)
+
+        if (rotationDegrees != 0) {
+            canvas.save()
+            canvas.translate(INPUT_SIZE / 2f, INPUT_SIZE / 2f)
+            canvas.rotate(rotationDegrees.toFloat())
+            val dst2 = android.graphics.RectF(-newW / 2f, -newH / 2f, newW / 2f, newH / 2f)
+            canvas.drawBitmap(src, null, dst2, lbPaint)
+            canvas.restore()
+        } else {
+            lbDst.set(padLeft.toFloat(), padTop.toFloat(),
+                (padLeft + newW).toFloat(), (padTop + newH).toFloat())
+            canvas.drawBitmap(src, null, lbDst, lbPaint)
+        }
 
         return LetterboxMeta(scale, padLeft, padTop)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Fill TFLite input buffer from the 640×640 letterboxed bitmap.
-    //
-    // Uses getPixels() into a pre-allocated IntArray then byte-shifts —
-    // fastest approach without JNI for this buffer size.
+    // inv255 is hoisted outside the loop to avoid per-pixel division.
     // ─────────────────────────────────────────────────────────────────────────
     private fun fillInputBuffer(bitmap: Bitmap) {
         val buf     = inputBuffer!!
@@ -463,26 +528,21 @@ class MainActivity : FlutterActivity() {
         if (isFloat32Model) {
             val inv255 = 1f / 255f
             for (px in scratch) {
-                buf.putFloat(((px shr 16) and 0xFF) * inv255)   // R
-                buf.putFloat(((px shr  8) and 0xFF) * inv255)   // G
-                buf.putFloat(( px         and 0xFF) * inv255)   // B
+                buf.putFloat(((px shr 16) and 0xFF) * inv255)
+                buf.putFloat(((px shr  8) and 0xFF) * inv255)
+                buf.putFloat(( px         and 0xFF) * inv255)
             }
         } else {
-            // INT8 quantised model — write raw bytes
             for (px in scratch) {
-                buf.put(((px shr 16) and 0xFF).toByte())   // R
-                buf.put(((px shr  8) and 0xFF).toByte())   // G
-                buf.put(( px         and 0xFF).toByte())   // B
+                buf.put(((px shr 16) and 0xFF).toByte())
+                buf.put(((px shr  8) and 0xFF).toByte())
+                buf.put(( px         and 0xFF).toByte())
             }
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Decode YOLO output + NMS
-    //
-    // Output tensor: [1, 4+numClasses, 8400]
-    //   Rows 0–3 : cx, cy, w, h  (normalised to INPUT_SIZE space)
-    //   Rows 4+  : per-class confidence scores
+    // Decode YOLO output + per-class NMS
     // ─────────────────────────────────────────────────────────────────────────
     private data class RawDet(
         val left: Float, val top: Float,
@@ -491,7 +551,7 @@ class MainActivity : FlutterActivity() {
     )
 
     private fun decodeOutput(
-        output: Array<FloatArray>,   // [4+C][8400]
+        output: Array<FloatArray>,
         scale: Float,
         padLeft: Int, padTop: Int,
         origW: Int, origH: Int
@@ -500,9 +560,12 @@ class MainActivity : FlutterActivity() {
         val numAnchors = output[0].size   // 8400 for 640-input YOLO
         val rawDets    = ArrayList<RawDet>(64)
 
+        // Reciprocals computed once — avoids division inside the 8400-iteration loop
+        val invScaleW = 1f / (scale * origW)
+        val invScaleH = 1f / (scale * origH)
+
         for (a in 0 until numAnchors) {
-            // Find highest-confidence class
-            var bestScore = CONF_THRESH   // early-exit: only enter loop if we already pass threshold
+            var bestScore = CONF_THRESH
             var bestClass = -1
             for (c in 0 until numClasses) {
                 val s = output[4 + c][a]
@@ -510,22 +573,15 @@ class MainActivity : FlutterActivity() {
             }
             if (bestClass == -1) continue
 
-            // cx/cy/w/h in INPUT_SIZE pixel space
             val cx = output[0][a] * INPUT_SIZE
             val cy = output[1][a] * INPUT_SIZE
             val bw = output[2][a] * INPUT_SIZE
             val bh = output[3][a] * INPUT_SIZE
 
-            val lbX1 = cx - bw / 2f
-            val lbY1 = cy - bh / 2f
-            val lbX2 = cx + bw / 2f
-            val lbY2 = cy + bh / 2f
-
-            // Undo letterbox → normalised [0,1] relative to original frame
-            val left   = (lbX1 - padLeft) / (scale * origW)
-            val top    = (lbY1 - padTop)  / (scale * origH)
-            val right  = (lbX2 - padLeft) / (scale * origW)
-            val bottom = (lbY2 - padTop)  / (scale * origH)
+            val left   = (cx - bw / 2f - padLeft) * invScaleW
+            val top    = (cy - bh / 2f - padTop)  * invScaleH
+            val right  = (cx + bw / 2f - padLeft) * invScaleW
+            val bottom = (cy + bh / 2f - padTop)  * invScaleH
 
             if (!isValidBox(left, top, right, bottom)) continue
             rawDets.add(RawDet(left, top, right, bottom, bestClass, bestScore))
@@ -547,7 +603,7 @@ class MainActivity : FlutterActivity() {
         if (!l.isFinite() || !t.isFinite() || !r.isFinite() || !b.isFinite()) return false
         val cl = l.coerceIn(0f, 1f); val ct = t.coerceIn(0f, 1f)
         val cr = r.coerceIn(0f, 1f); val cb = b.coerceIn(0f, 1f)
-        val w = cr - cl;  val h = cb - ct
+        val w = cr - cl; val h = cb - ct
         if (w <= 0f || h <= 0f || w < 0.01f || h < 0.01f) return false
         val area = w * h
         return area >= 0.0005f && area <= 0.95f
@@ -583,10 +639,12 @@ class MainActivity : FlutterActivity() {
     // ─────────────────────────────────────────────────────────────────────────
     private fun disposeAll() {
         stopCamera()
-        interpreter?.close();    interpreter    = null
-        gpuDelegate?.close();    gpuDelegate    = null
-        nnApiDelegate?.close();  nnApiDelegate  = null
+        interpreter?.close();       interpreter     = null
+        gpuDelegate?.close();       gpuDelegate     = null
+        nnApiDelegate?.close();     nnApiDelegate   = null
         letterboxBitmap?.recycle(); letterboxBitmap = null
+        rgbScratch?.recycle();      rgbScratch      = null
+        lbCanvas = null
         flutterSurfaceTextureEntry?.release()
         if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
         Log.i(TAG, "All native resources disposed")

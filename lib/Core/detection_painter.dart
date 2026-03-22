@@ -5,21 +5,10 @@ import 'yolo_model.dart';
 // ── Palette ───────────────────────────────────────────────────────────────────
 
 const List<Color> _palette = [
-  Color(0xFFFF3B30),
-  Color(0xFFFF9500),
-  Color(0xFFFFCC00),
-  Color(0xFF34C759),
-  Color(0xFF00C7BE),
-  Color(0xFF007AFF),
-  Color(0xFF5856D6),
-  Color(0xFFAF52DE),
-  Color(0xFFFF2D55),
-  Color(0xFF30B0C7),
-  Color(0xFF32ADE6),
-  Color(0xFFFF6482),
-  Color(0xFF64D2FF),
-  Color(0xFFBF5AF2),
-  Color(0xFFFFD60A),
+  Color(0xFFFF3B30), Color(0xFFFF9500), Color(0xFFFFCC00), Color(0xFF34C759),
+  Color(0xFF00C7BE), Color(0xFF007AFF), Color(0xFF5856D6), Color(0xFFAF52DE),
+  Color(0xFFFF2D55), Color(0xFF30B0C7), Color(0xFF32ADE6), Color(0xFFFF6482),
+  Color(0xFF64D2FF), Color(0xFFBF5AF2), Color(0xFFFFD60A),
 ];
 
 Color colorForLabel(String label) =>
@@ -27,37 +16,36 @@ Color colorForLabel(String label) =>
 
 // ── Rect helpers ──────────────────────────────────────────────────────────────
 
-/// BoxFit.contain — scales [src] to fit inside [dst], centred, no cropping.
 ui.Rect containRect(Size src, Size dst) {
   final sa = src.width / src.height;
   final da = dst.width / dst.height;
-  double w, h;
-  if (sa > da) {
-    w = dst.width;
-    h = dst.width / sa;
-  } else {
-    h = dst.height;
-    w = dst.height * sa;
-  }
+  final double w, h;
+  if (sa > da) { w = dst.width;  h = dst.width  / sa; }
+  else          { h = dst.height; w = dst.height * sa; }
   return ui.Rect.fromLTWH((dst.width - w) / 2, (dst.height - h) / 2, w, h);
 }
 
-/// BoxFit.cover — scales [src] to fill [dst], centred, may crop.
 ui.Rect coverRect(Size src, Size dst) {
   final sa = src.width / src.height;
   final da = dst.width / dst.height;
-  double w, h;
-  if (sa < da) {
-    w = dst.width;
-    h = dst.width / sa;
-  } else {
-    h = dst.height;
-    w = dst.height * sa;
-  }
+  final double w, h;
+  if (sa < da) { w = dst.width;  h = dst.width  / sa; }
+  else          { h = dst.height; w = dst.height * sa; }
   return ui.Rect.fromLTWH((dst.width - w) / 2, (dst.height - h) / 2, w, h);
 }
 
-// ── Core drawing helpers (used by both painters) ──────────────────────────────
+// ── Reusable Paint objects — allocated once, mutated per draw call ────────────
+// Eliminates per-detection Paint() allocations in the hot path.
+final _fillPaint   = Paint();
+final _borderPaint = Paint()
+  ..strokeWidth = 2.5
+  ..style = PaintingStyle.stroke;
+final _cornerPaint = Paint()
+  ..strokeWidth = 3.5
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round;
+
+// ── Core drawing helpers ──────────────────────────────────────────────────────
 
 void drawDetections(
   Canvas canvas,
@@ -68,63 +56,58 @@ void drawDetections(
     final color = colorForLabel(det.label);
     final bb = det.boundingBox;
 
-    // Map normalised [0,1] → pixel coords inside displayRect
-    final l = displayRect.left + bb.left * displayRect.width;
-    final t = displayRect.top + bb.top * displayRect.height;
-    final r = displayRect.left + bb.right * displayRect.width;
-    final b = displayRect.top + bb.bottom * displayRect.height;
+    final l = displayRect.left + bb.left   * displayRect.width;
+    final t = displayRect.top  + bb.top    * displayRect.height;
+    final r = displayRect.left + bb.right  * displayRect.width;
+    final b = displayRect.top  + bb.bottom * displayRect.height;
     final rect = ui.Rect.fromLTRB(l, t, r, b);
 
-    // Fill
-    canvas.drawRect(rect, Paint()..color = color.withValues(alpha: 0.15));
+    _fillPaint.color   = color.withValues(alpha: 0.15);
+    canvas.drawRect(rect, _fillPaint);
 
-    // Border
-    canvas.drawRect(
-      rect,
-      Paint()
-        ..color = color
-        ..strokeWidth = 2.5
-        ..style = PaintingStyle.stroke,
-    );
+    _borderPaint.color = color;
+    canvas.drawRect(rect, _borderPaint);
 
-    // Corner ticks
     _drawCorners(canvas, rect, color);
 
-    // Label badge — above the box top edge, or below if near top of screen
     final badgeAnchorY = t < 28 ? b + 2 : t;
-    final above = t >= 28;
     _drawBadge(
       canvas,
       '${det.label}  ${(det.confidence * 100).toStringAsFixed(0)}%',
       Offset(l, badgeAnchorY),
       color,
-      above: above,
+      above: t >= 28,
     );
   }
 }
 
 void _drawCorners(Canvas canvas, ui.Rect r, Color color) {
   final len = (r.shortestSide * 0.18).clamp(9.0, 18.0);
-  final p = Paint()
-    ..color = color
-    ..strokeWidth = 3.5
-    ..style = PaintingStyle.stroke
-    ..strokeCap = StrokeCap.round;
-
+  _cornerPaint.color = color;
   canvas
-    // TL
-    ..drawLine(r.topLeft, r.topLeft + Offset(len, 0), p)
-    ..drawLine(r.topLeft, r.topLeft + Offset(0, len), p)
-    // TR
-    ..drawLine(r.topRight, r.topRight + Offset(-len, 0), p)
-    ..drawLine(r.topRight, r.topRight + Offset(0, len), p)
-    // BL
-    ..drawLine(r.bottomLeft, r.bottomLeft + Offset(len, 0), p)
-    ..drawLine(r.bottomLeft, r.bottomLeft + Offset(0, -len), p)
-    // BR
-    ..drawLine(r.bottomRight, r.bottomRight + Offset(-len, 0), p)
-    ..drawLine(r.bottomRight, r.bottomRight + Offset(0, -len), p);
+    ..drawLine(r.topLeft,     r.topLeft     + Offset(len, 0),   _cornerPaint)
+    ..drawLine(r.topLeft,     r.topLeft     + Offset(0,   len), _cornerPaint)
+    ..drawLine(r.topRight,    r.topRight    + Offset(-len, 0),  _cornerPaint)
+    ..drawLine(r.topRight,    r.topRight    + Offset(0,   len), _cornerPaint)
+    ..drawLine(r.bottomLeft,  r.bottomLeft  + Offset(len, 0),   _cornerPaint)
+    ..drawLine(r.bottomLeft,  r.bottomLeft  + Offset(0,  -len), _cornerPaint)
+    ..drawLine(r.bottomRight, r.bottomRight + Offset(-len, 0),  _cornerPaint)
+    ..drawLine(r.bottomRight, r.bottomRight + Offset(0,  -len), _cornerPaint);
 }
+
+// Reusable TextPainter — layout() is still called per badge but the object
+// itself is not re-created on every draw call.
+final _tp = TextPainter(textDirection: TextDirection.ltr);
+
+const _badgePx = 7.0;
+const _badgePy = 4.0;
+const _badgeStyle = TextStyle(
+  color: Colors.white,
+  fontSize: 11.5,
+  fontWeight: FontWeight.w700,
+);
+
+final _badgePaint = Paint();
 
 void _drawBadge(
   Canvas canvas,
@@ -133,35 +116,24 @@ void _drawBadge(
   Color color, {
   required bool above,
 }) {
-  const style = TextStyle(
-    color: Colors.white,
-    fontSize: 11.5,
-    fontWeight: FontWeight.w700,
-  );
-  final tp = TextPainter(
-    text: TextSpan(text: text, style: style),
-    textDirection: TextDirection.ltr,
-  )..layout();
+  _tp.text = TextSpan(text: text, style: _badgeStyle);
+  _tp.layout();
 
-  const px = 7.0, py = 4.0;
-  final bw = tp.width + px * 2;
-  final bh = tp.height + py * 2;
-
-  // "above" → badge sits above the anchor line; else below it
+  final bw = _tp.width  + _badgePx * 2;
+  final bh = _tp.height + _badgePy * 2;
   final by = above ? anchor.dy - bh : anchor.dy;
   final badgeRect = ui.Rect.fromLTWH(anchor.dx, by, bw, bh);
 
+  _badgePaint.color = color;
   canvas.drawRRect(
     RRect.fromRectAndRadius(badgeRect, const Radius.circular(4)),
-    Paint()..color = color,
+    _badgePaint,
   );
-  tp.paint(canvas, Offset(badgeRect.left + px, badgeRect.top + py));
+  _tp.paint(canvas, Offset(badgeRect.left + _badgePx, badgeRect.top + _badgePy));
 }
 
-// ── Still-image painter (contain fit) ────────────────────────────────────────
+// ── Still-image painter ───────────────────────────────────────────────────────
 
-/// Renders [image] letter-boxed then draws detections on top.
-/// Use this for the image-picker screen.
 class ImageDetectionPainter extends CustomPainter {
   final ui.Image image;
   final List<Detection> detections;
@@ -172,36 +144,25 @@ class ImageDetectionPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final imgSize = Size(image.width.toDouble(), image.height.toDouble());
     final fitRect = containRect(imgSize, size);
-
-    // Draw image
     canvas.drawImageRect(
       image,
       ui.Rect.fromLTWH(0, 0, imgSize.width, imgSize.height),
       fitRect,
       Paint(),
     );
-
-    // Draw detections mapped onto the image rect
     drawDetections(canvas, detections, fitRect);
   }
 
   @override
   bool shouldRepaint(ImageDetectionPainter old) =>
-      old.image != image || old.detections != detections;
+      old.image != image || !identical(old.detections, detections);
 }
 
-// ── Live-camera overlay painter (cover fit) ───────────────────────────────────
+// ── Live-camera overlay painter ───────────────────────────────────────────────
 
-/// Paints YOLO boxes over a live [CameraPreview].
-///
-/// CameraPreview fills its parent using BoxFit.cover, so we replicate that
-/// transform so normalised [0,1] coordinates land on the correct pixels.
-///
-/// [cameraLogicalSize] is the size of the camera sensor in *display* orientation
-/// (width = previewSize.height, height = previewSize.width on most phones).
 class CameraDetectionPainter extends CustomPainter {
   final List<Detection> detections;
-  final Size cameraLogicalSize; // sensor display-orientation size
+  final Size cameraLogicalSize;
 
   const CameraDetectionPainter({
     required this.detections,
@@ -210,13 +171,11 @@ class CameraDetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // CameraPreview uses BoxFit.cover → use coverRect
-    final displayRect = coverRect(cameraLogicalSize, size);
-    drawDetections(canvas, detections, displayRect);
+    drawDetections(canvas, detections, coverRect(cameraLogicalSize, size));
   }
 
   @override
   bool shouldRepaint(CameraDetectionPainter old) =>
-      old.detections != detections ||
+      !identical(old.detections, detections) ||
       old.cameraLogicalSize != cameraLogicalSize;
 }

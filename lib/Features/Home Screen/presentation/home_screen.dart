@@ -30,9 +30,9 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await _bridge.loadModel(
         modelPath:
-            'assets/models/yolo11n_int8.tflite', //yolo11n_int8 //android/app/src/main/
+            'assets/models/yolov8n_float32.tflite', //yolo11n_int8 //android/app/src/main/
         labels: cocoLabels, // swap to cocoLabels if using a COCO model
-        delegate: 'gpu', // 'gpu' | 'nnapi' | 'cpu'
+        delegate: 'nnapi', // 'gpu' | 'nnapi' | 'cpu'
       );
       if (mounted) setState(() => _modelLoaded = true);
     } catch (e) {

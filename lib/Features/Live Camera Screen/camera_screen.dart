@@ -8,8 +8,7 @@ import '../../Core/yolo_model.dart';
 /// Live camera detection screen.
 ///
 /// The camera preview is rendered via a Flutter [Texture] widget that maps
-/// directly to the native SurfaceTexture registered with [FlutterEngine].
-/// All inference (YUV→RGB, letterbox, TFLite, NMS) runs entirely in Kotlin.
+/// directly to the native SurfaceTexture. All inference runs in Kotlin.
 /// Dart only receives final bounding-box data through the EventChannel.
 class LiveCameraScreen extends StatefulWidget {
   final NativeDetectionBridge bridge;
@@ -22,14 +21,11 @@ class LiveCameraScreen extends StatefulWidget {
 class _LiveCameraScreenState extends State<LiveCameraScreen>
     with WidgetsBindingObserver {
 
-  List<Detection> _detections = [];
+  List<Detection> _detections = const [];
   double _fps     = 0;
   int    _inferMs = 0;
   String? _error;
-
-  /// The Flutter texture ID returned by native `startCamera`.
-  /// Until it is set the screen shows a loading indicator.
-  int? _textureId;
+  int?    _textureId;
 
   @override
   void initState() {
@@ -57,8 +53,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
 
   void _onFrame(NativeFrame frame) {
     if (!mounted) return;
-    // Use a direct setState — this is already throttled by the native
-    // frame-drop gate, so we never flood the UI thread.
+    // Native throttles sends to ~12/s (MIN_SEND_INTERVAL_MS = 80).
+    // Each setState triggers one raster frame; this is already cheap.
     setState(() {
       _detections = frame.detections;
       _fps        = frame.fps;
@@ -71,7 +67,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     if (state == AppLifecycleState.paused) {
       widget.bridge.stopCamera();
     } else if (state == AppLifecycleState.resumed) {
-      _textureId = null;
+      setState(() => _textureId = null);
       _startNativeCamera();
     }
   }
@@ -89,11 +85,9 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(
-            _error!,
-            style: const TextStyle(color: Colors.redAccent),
-            textAlign: TextAlign.center,
-          ),
+          child: Text(_error!,
+              style: const TextStyle(color: Colors.redAccent),
+              textAlign: TextAlign.center),
         ),
       );
     }
@@ -115,31 +109,30 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     return Stack(
       fit: StackFit.expand,
       children: [
-        // ── Native camera preview via Flutter Texture widget ──────────────────
-        // Texture maps directly to the SurfaceTexture registered in Kotlin.
-        // Zero pixel copies — the GPU composites this straight onto the screen.
-        Texture(textureId: _textureId!),
+        // Native preview — wrap in RepaintBoundary so the texture compositing
+        // layer is isolated; Flutter won't re-rasterize it when overlays change.
+        RepaintBoundary(child: Texture(textureId: _textureId!)),
 
-        // ── Bounding-box overlay ──────────────────────────────────────────────
-        // Uses a fullscreen painter; bounding boxes are already in normalised
-        // [0,1] screen coordinates, so no fit-transform is needed here.
-        SizedBox.expand(
-          child: CustomPaint(
-            painter: _FullscreenDetectionPainter(detections: _detections),
+        // Bounding-box overlay — kept in its own RepaintBoundary so the
+        // raster cache for the Texture is NOT invalidated on every detection.
+        RepaintBoundary(
+          child: SizedBox.expand(
+            child: CustomPaint(
+              painter: _FullscreenDetectionPainter(detections: _detections),
+            ),
           ),
         ),
 
-        // ── HUD ───────────────────────────────────────────────────────────────
+        // HUD — light widget, doesn't need its own boundary
         Positioned(
           top: 12, right: 12,
           child: _Hud(fps: _fps, inferMs: _inferMs, count: _detections.length),
         ),
 
-        // ── Bottom detection strip ────────────────────────────────────────────
         if (_detections.isNotEmpty)
           Positioned(
             bottom: 0, left: 0, right: 0,
-            child: _BottomStrip(detections: _detections),
+            child: RepaintBoundary(child: _BottomStrip(detections: _detections)),
           ),
       ],
     );
@@ -154,16 +147,15 @@ class _FullscreenDetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    drawDetections(
-      canvas,
-      detections,
-      ui.Rect.fromLTWH(0, 0, size.width, size.height),
-    );
+    drawDetections(canvas, detections,
+        ui.Rect.fromLTWH(0, 0, size.width, size.height));
   }
 
   @override
   bool shouldRepaint(_FullscreenDetectionPainter old) =>
-      old.detections != detections;
+      // List identity check is O(1) — sufficient because _onFrame always assigns
+      // a new list from NativeFrame.fromMap (growable: false).
+      !identical(old.detections, detections);
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
@@ -186,7 +178,8 @@ class _Hud extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          _hudRow(Icons.speed,          Colors.greenAccent, '${fps.toStringAsFixed(1)} FPS'),
+          _hudRow(Icons.speed,          Colors.greenAccent,
+              '${fps.toStringAsFixed(1)} FPS'),
           const SizedBox(height: 2),
           _hudRow(Icons.timer_outlined, Colors.amberAccent, '$inferMs ms'),
           const SizedBox(height: 2),
@@ -204,7 +197,7 @@ class _Hud extends StatelessWidget {
       const SizedBox(width: 4),
       Text(text,
           style: TextStyle(
-            color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+              color: color, fontSize: 12, fontWeight: FontWeight.bold)),
     ],
   );
 }
@@ -217,8 +210,10 @@ class _BottomStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Sort is O(n log n) but n is typically < 10; no perf concern.
     final sorted = [...detections]
       ..sort((a, b) => b.confidence.compareTo(a.confidence));
+
     return Container(
       height: 52,
       color: Colors.black.withValues(alpha: 0.55),
