@@ -286,13 +286,17 @@ void drawRiskOverlay(
     }
 
     if (ttc != null) {
-      _drawSubLabel(
+      final ttcColor = ttc > 2.0
+          ? Colors.green
+          : (ttc > 1.0 ? Colors.orange : Colors.red);
+      _drawSubLabelColored(
         canvas,
         'TTC:${ttc.toStringAsFixed(1)}s',
         Offset(
           displayRect.left + bb.left * displayRect.width,
           displayRect.top + bb.bottom * displayRect.height + 18,
         ),
+        ttcColor,
       );
     }
   }
@@ -322,6 +326,15 @@ const _subStyle = TextStyle(
 
 void _drawSubLabel(Canvas canvas, String text, Offset anchor) {
   _subTp.text = TextSpan(text: text, style: _subStyle);
+  _subTp.layout();
+  _subTp.paint(canvas, anchor);
+}
+
+void _drawSubLabelColored(Canvas canvas, String text, Offset anchor, Color color) {
+  _subTp.text = TextSpan(
+    text: text,
+    style: _subStyle.copyWith(color: color),
+  );
   _subTp.layout();
   _subTp.paint(canvas, anchor);
 }
