@@ -71,9 +71,10 @@ void drawDetections(
     _drawCorners(canvas, rect, color);
 
     final badgeAnchorY = t < 28 ? b + 2 : t;
+    final idPrefix = det.hasTrackId ? 'ID:${det.trackId} · ' : '';
     _drawBadge(
       canvas,
-      '${det.label}  ${(det.confidence * 100).toStringAsFixed(0)}%',
+      '$idPrefix${det.label}  ${(det.confidence * 100).toStringAsFixed(0)}%',
       Offset(l, badgeAnchorY),
       color,
       above: t >= 28,

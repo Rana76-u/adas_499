@@ -83,6 +83,9 @@ class MainActivity : FlutterActivity() {
     private var emaFps: Double    = 0.0   // mutable — not const
     private var lastSendMs: Long  = 0L
 
+    /** IoU + class association; mirrors notebook DeepSORT-style max_age / n_init. */
+    private val objectTracker = ObjectTracker(maxAge = 30, nInit = 3)
+
     // Pre-allocated letterbox canvas and paint objects (no per-frame allocation)
     private var lbCanvas: android.graphics.Canvas? = null
     private val lbPaint  = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
@@ -253,6 +256,7 @@ class MainActivity : FlutterActivity() {
     // CameraX
     // ─────────────────────────────────────────────────────────────────────────
     private fun startCamera() {
+        objectTracker.reset()
         isRunning = true
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
@@ -328,8 +332,10 @@ class MainActivity : FlutterActivity() {
             val srcW = if (rotation % 180 == 0) imageProxy.width  else imageProxy.height
             val srcH = if (rotation % 180 == 0) imageProxy.height else imageProxy.width
 
-            // 6. Decode + NMS
-            val dets    = decodeOutput(out[0], scale, padLeft, padTop, srcW, srcH)
+            // 6. Decode + NMS + multi-object tracking
+            val boxes   = decodeOutput(out[0], scale, padLeft, padTop, srcW, srcH)
+            val tracked = objectTracker.update(boxes, emaFps.coerceAtLeast(1.0))
+            val dets    = tracked.map { it.toFlutterMap() }
             val inferMs = System.currentTimeMillis() - t0
 
             // 7. EMA FPS
@@ -421,6 +427,7 @@ class MainActivity : FlutterActivity() {
         val realOrigH = ((INPUT_SIZE - 2 * padTop)  / scale).toInt().coerceAtLeast(1)
 
         return decodeOutput(oBuf[0], scale, padLeft, padTop, realOrigW, realOrigH)
+            .map { b -> b.toStillImageMap() }
             .also { Log.d(TAG, "runOnImage → ${it.size} detections") }
     }
 
@@ -555,7 +562,7 @@ class MainActivity : FlutterActivity() {
         scale: Float,
         padLeft: Int, padTop: Int,
         origW: Int, origH: Int
-    ): List<Map<String, Any>> {
+    ): List<DetectionBox> {
 
         val numAnchors = output[0].size   // 8400 for 640-input YOLO
         val rawDets    = ArrayList<RawDet>(64)
@@ -588,16 +595,45 @@ class MainActivity : FlutterActivity() {
         }
 
         return nms(rawDets).map { d ->
-            mapOf(
-                "label"      to (labels.getOrElse(d.classIdx) { "class_${d.classIdx}" }),
-                "confidence" to d.score.toDouble(),
-                "left"       to d.left.toDouble().coerceIn(0.0, 1.0),
-                "top"        to d.top.toDouble().coerceIn(0.0, 1.0),
-                "right"      to d.right.toDouble().coerceIn(0.0, 1.0),
-                "bottom"     to d.bottom.toDouble().coerceIn(0.0, 1.0)
+            DetectionBox(
+                left   = d.left.coerceIn(0f, 1f),
+                top    = d.top.coerceIn(0f, 1f),
+                right  = d.right.coerceIn(0f, 1f),
+                bottom = d.bottom.coerceIn(0f, 1f),
+                classIdx = d.classIdx,
+                score  = d.score,
+                label  = labels.getOrElse(d.classIdx) { "class_${d.classIdx}" },
             )
         }
     }
+
+    private fun TrackedDetection.toFlutterMap(): Map<String, Any> {
+        val b = box
+        return mapOf(
+            "label"      to b.label,
+            "confidence" to b.score.toDouble(),
+            "left"       to b.left.toDouble(),
+            "top"        to b.top.toDouble(),
+            "right"      to b.right.toDouble(),
+            "bottom"     to b.bottom.toDouble(),
+            "trackId"    to trackId,
+            "vx"         to vxNormPerSec,
+            "vy"         to vyNormPerSec,
+        )
+    }
+
+    /** Single-frame inference has no temporal context. */
+    private fun DetectionBox.toStillImageMap(): Map<String, Any> = mapOf(
+        "label"      to label,
+        "confidence" to score.toDouble(),
+        "left"       to left.toDouble(),
+        "top"        to top.toDouble(),
+        "right"      to right.toDouble(),
+        "bottom"     to bottom.toDouble(),
+        "trackId"    to -1,
+        "vx"         to 0.0,
+        "vy"         to 0.0,
+    )
 
     private fun isValidBox(l: Float, t: Float, r: Float, b: Float): Boolean {
         if (!l.isFinite() || !t.isFinite() || !r.isFinite() || !b.isFinite()) return false
@@ -638,6 +674,7 @@ class MainActivity : FlutterActivity() {
     // Cleanup
     // ─────────────────────────────────────────────────────────────────────────
     private fun disposeAll() {
+        objectTracker.reset()
         stopCamera()
         interpreter?.close();       interpreter     = null
         gpuDelegate?.close();       gpuDelegate     = null

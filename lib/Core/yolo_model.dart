@@ -6,11 +6,23 @@ class Detection {
   final double confidence;
   final Rect boundingBox;
 
+  /// Stable object id from native multi-object tracking (-1 = unconfirmed / still image).
+  final int trackId;
+
+  /// Normalized-coordinate velocity (per second), from frame-to-frame center delta × FPS.
+  final double vxNormPerSec;
+  final double vyNormPerSec;
+
   const Detection({
     required this.label,
     required this.confidence,
     required this.boundingBox,
+    this.trackId = -1,
+    this.vxNormPerSec = 0,
+    this.vyNormPerSec = 0,
   });
+
+  bool get hasTrackId => trackId >= 0;
 
   /// Deserialise from the Map sent over the native EventChannel.
   factory Detection.fromMap(Map<Object?, Object?> map) {
@@ -23,6 +35,9 @@ class Detection {
         right: (map['right'] as num).toDouble(),
         bottom: (map['bottom'] as num).toDouble(),
       ),
+      trackId: (map['trackId'] as num?)?.toInt() ?? -1,
+      vxNormPerSec: (map['vx'] as num?)?.toDouble() ?? 0,
+      vyNormPerSec: (map['vy'] as num?)?.toDouble() ?? 0,
     );
   }
 
@@ -30,6 +45,7 @@ class Detection {
   String toString() =>
       'Detection(label: $label, '
       'confidence: ${confidence.toStringAsFixed(2)}, '
+      'trackId: $trackId, '
       'box: $boundingBox)';
 }
 
