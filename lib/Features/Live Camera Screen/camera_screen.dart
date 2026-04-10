@@ -22,6 +22,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     with WidgetsBindingObserver {
 
   List<Detection> _detections = const [];
+  /// Per-track normalized center history (see notebook `track_history`, maxlen 30).
+  Map<int, List<ui.Offset>> _trailNormByTrack = {};
   double _fps     = 0;
   int    _inferMs = 0;
   String? _error;
@@ -51,6 +53,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     }
   }
 
+  static const int _kTrailLength = 30;
+
   void _onFrame(NativeFrame frame) {
     if (!mounted) return;
     // Native throttles sends to ~12/s (MIN_SEND_INTERVAL_MS = 80).
@@ -59,7 +63,27 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       _detections = frame.detections;
       _fps        = frame.fps;
       _inferMs    = frame.inferMs;
+      _updateTrails(frame.detections);
     });
+  }
+
+  void _updateTrails(List<Detection> dets) {
+    final seen = <int>{};
+    final next = Map<int, List<ui.Offset>>.from(_trailNormByTrack);
+    for (final d in dets) {
+      if (!d.hasTrackId) continue;
+      seen.add(d.trackId);
+      final bb = d.boundingBox;
+      final c = ui.Offset(bb.centerX, bb.centerY);
+      final prev = next[d.trackId] ?? const <ui.Offset>[];
+      final list = [...prev, c];
+      while (list.length > _kTrailLength) {
+        list.removeAt(0);
+      }
+      next[d.trackId] = list;
+    }
+    next.removeWhere((k, _) => !seen.contains(k));
+    _trailNormByTrack = next;
   }
 
   @override
@@ -118,7 +142,10 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
         RepaintBoundary(
           child: SizedBox.expand(
             child: CustomPaint(
-              painter: _FullscreenDetectionPainter(detections: _detections),
+              painter: _FullscreenDetectionPainter(
+                detections: _detections,
+                trailNormByTrack: _trailNormByTrack,
+              ),
             ),
           ),
         ),
@@ -143,19 +170,25 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
 
 class _FullscreenDetectionPainter extends CustomPainter {
   final List<Detection> detections;
-  const _FullscreenDetectionPainter({required this.detections});
+  final Map<int, List<ui.Offset>> trailNormByTrack;
+
+  const _FullscreenDetectionPainter({
+    required this.detections,
+    required this.trailNormByTrack,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    drawDetections(canvas, detections,
-        ui.Rect.fromLTWH(0, 0, size.width, size.height));
+    final rect = ui.Rect.fromLTWH(0, 0, size.width, size.height);
+    drawTrailsAndPredictedPaths(canvas, rect, detections, trailNormByTrack);
+    drawDetections(canvas, detections, rect, showMonocularDistance: true);
+    drawVelocityArrowsAndLabels(canvas, rect, detections);
   }
 
   @override
   bool shouldRepaint(_FullscreenDetectionPainter old) =>
-      // List identity check is O(1) — sufficient because _onFrame always assigns
-      // a new list from NativeFrame.fromMap (growable: false).
-      !identical(old.detections, detections);
+      !identical(old.detections, detections) ||
+      !identical(old.trailNormByTrack, trailNormByTrack);
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'adas_visual_math.dart';
 import 'yolo_model.dart';
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -45,13 +47,39 @@ final _cornerPaint = Paint()
   ..style = PaintingStyle.stroke
   ..strokeCap = StrokeCap.round;
 
+// Notebook palette (BGR) → Flutter: trail magenta, pred yellow, velocity red
+final _trailPaint = Paint()
+  ..strokeWidth = 2
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round
+  ..color = const Color(0xFFFF00FF);
+final _predPaint = Paint()
+  ..strokeWidth = 2
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round
+  ..color = const Color(0xFFFFFF00);
+final _velPaint = Paint()
+  ..strokeWidth = 2
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round
+  ..color = const Color(0xFFFF0000);
+
+const int _kPredictionSteps = 15;
+
 // ── Core drawing helpers ──────────────────────────────────────────────────────
+
+/// Normalized center → overlay pixel position.
+Offset _normToScreen(Offset norm, ui.Rect displayRect) => Offset(
+      displayRect.left + norm.dx * displayRect.width,
+      displayRect.top + norm.dy * displayRect.height,
+    );
 
 void drawDetections(
   Canvas canvas,
   List<Detection> detections,
-  ui.Rect displayRect,
-) {
+  ui.Rect displayRect, {
+  bool showMonocularDistance = false,
+}) {
   for (final det in detections) {
     final color = colorForLabel(det.label);
     final bb = det.boundingBox;
@@ -72,14 +100,125 @@ void drawDetections(
 
     final badgeAnchorY = t < 28 ? b + 2 : t;
     final idPrefix = det.hasTrackId ? 'ID:${det.trackId} · ' : '';
+    var line = '$idPrefix${det.label}  ${(det.confidence * 100).toStringAsFixed(0)}%';
+    if (showMonocularDistance) {
+      final dist = estimateDistanceMeters(
+        boxHeightNorm: bb.height,
+        realObjectHeightM: defaultObjectHeightMeters(det.label),
+      );
+      if (dist.isFinite && dist > 0.3 && dist < 250) {
+        line += '  D:${dist.toStringAsFixed(1)}m';
+      }
+    }
     _drawBadge(
       canvas,
-      '$idPrefix${det.label}  ${(det.confidence * 100).toStringAsFixed(0)}%',
+      line,
       Offset(l, badgeAnchorY),
       color,
       above: t >= 28,
     );
   }
+}
+
+/// Trail (magenta) + predicted path (yellow), drawn beneath boxes — see [assets/code.ipynb].
+void drawTrailsAndPredictedPaths(
+  Canvas canvas,
+  ui.Rect displayRect,
+  List<Detection> detections,
+  Map<int, List<Offset>> trailNormByTrack,
+) {
+  for (final e in trailNormByTrack.entries) {
+    final hist = e.value;
+    if (hist.length > 1) {
+      for (var i = 1; i < hist.length; i++) {
+        canvas.drawLine(
+          _normToScreen(hist[i - 1], displayRect),
+          _normToScreen(hist[i], displayRect),
+          _trailPaint,
+        );
+      }
+    }
+  }
+
+  for (final det in detections) {
+    if (!det.hasTrackId) continue;
+    final pts = trailNormByTrack[det.trackId];
+    if (pts == null || pts.length < 2) continue;
+    final pred = predictTrajectoryNorm(pts, _kPredictionSteps);
+    if (pred.length < 2) continue;
+    for (var i = 0; i < pred.length - 1; i++) {
+      canvas.drawLine(
+        _normToScreen(pred[i], displayRect),
+        _normToScreen(pred[i + 1], displayRect),
+        _predPaint,
+      );
+    }
+  }
+}
+
+/// Velocity arrow (red) + direction / speed caption — notebook uses `speed > 5` px/s.
+void drawVelocityArrowsAndLabels(
+  Canvas canvas,
+  ui.Rect displayRect,
+  List<Detection> detections,
+) {
+  final scale = math.min(displayRect.width, displayRect.height) * 0.04;
+  const speedThresholdNorm = 0.003;
+
+  for (final det in detections) {
+    if (!det.hasTrackId) continue;
+    final sp = speedNormPerSec(det.vxNormPerSec, det.vyNormPerSec);
+    if (sp <= speedThresholdNorm) continue;
+
+    final bb = det.boundingBox;
+    final cx = (bb.left + bb.right) / 2;
+    final cy = (bb.top + bb.bottom) / 2;
+    final center = Offset(
+      displayRect.left + cx * displayRect.width,
+      displayRect.top + cy * displayRect.height,
+    );
+    final end = Offset(
+      center.dx + det.vxNormPerSec * scale,
+      center.dy + det.vyNormPerSec * scale,
+    );
+    _drawArrowLine(canvas, center, end, _velPaint.color);
+
+    final dir = directionLabelFromVelocity(det.vxNormPerSec, det.vyNormPerSec);
+    final pxApprox = sp * math.min(displayRect.width, displayRect.height);
+    final caption = '$dir ${pxApprox.toStringAsFixed(0)} px/s';
+    _drawSubLabel(canvas, caption, Offset(
+      displayRect.left + bb.left * displayRect.width,
+      displayRect.top + bb.bottom * displayRect.height + 4,
+    ));
+  }
+}
+
+void _drawArrowLine(Canvas canvas, Offset from, Offset to, Color color) {
+  _velPaint.color = color;
+  final d = to - from;
+  final len = d.distance;
+  if (len < 2) return;
+  final u = Offset(d.dx / len, d.dy / len);
+  canvas.drawLine(from, to, _velPaint);
+  final headLen = math.min(10.0, len * 0.35);
+  final base = to - u * headLen;
+  final perp = Offset(-u.dy, u.dx) * (headLen * 0.45);
+  canvas.drawLine(to, base + perp, _velPaint);
+  canvas.drawLine(to, base - perp, _velPaint);
+}
+
+final _subTp = TextPainter(textDirection: TextDirection.ltr);
+
+const _subStyle = TextStyle(
+  color: Color(0xFFFF4444),
+  fontSize: 10.5,
+  fontWeight: FontWeight.w600,
+);
+
+void _drawSubLabel(Canvas canvas, String text, Offset anchor) {
+  _subTp.text = TextSpan(text: text, style: _subStyle);
+  _subTp.layout();
+  _subTp.paint(canvas, anchor);
 }
 
 void _drawCorners(Canvas canvas, ui.Rect r, Color color) {
@@ -151,7 +290,7 @@ class ImageDetectionPainter extends CustomPainter {
       fitRect,
       Paint(),
     );
-    drawDetections(canvas, detections, fitRect);
+    drawDetections(canvas, detections, fitRect, showMonocularDistance: true);
   }
 
   @override
