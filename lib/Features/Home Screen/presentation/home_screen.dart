@@ -1,5 +1,5 @@
 import 'package:adas_499/Features/Live%20Camera%20Screen/camera_screen.dart';
-import 'package:adas_499/Features/Home%20Screen/presentation/image_screen.dart';
+import 'package:adas_499/Features/Settings%20Screen/settings_screen.dart';
 import 'package:adas_499/Shared/custom_appbar.dart';
 import 'package:flutter/material.dart';
 import 'package:adas_499/Core/native_detection_bridge.dart';
@@ -66,12 +66,12 @@ class _HomeScreenState extends State<HomeScreen> {
         unselectedItemColor: Colors.white38,
         items: const [
           BottomNavigationBarItem(
-            icon: Icon(Icons.image_rounded),
-            label: 'Image',
+            icon: Icon(Icons.videocam_rounded),
+            label: 'Live Feed',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.videocam_rounded),
-            label: 'Live Camera',
+            icon: Icon(Icons.settings_rounded),
+            label: 'Settings',
           ),
         ],
       ),
@@ -136,10 +136,10 @@ class _HomeScreenState extends State<HomeScreen> {
     return IndexedStack(
       index: _selectedTab,
       children: [
-        // Image tab still works the same way
-        ImageDetectionScreen(bridge: _bridge),
         // Live camera tab now uses the native pipeline
         LiveCameraScreen(bridge: _bridge),
+        // Image tab still works the same way
+        SettingsScreen(),
       ],
     );
   }

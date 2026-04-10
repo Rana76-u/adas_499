@@ -155,12 +155,6 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
           top: 12, right: 12,
           child: _Hud(fps: _fps, inferMs: _inferMs, count: _detections.length),
         ),
-
-        if (_detections.isNotEmpty)
-          Positioned(
-            bottom: 0, left: 0, right: 0,
-            child: RepaintBoundary(child: _BottomStrip(detections: _detections)),
-          ),
       ],
     );
   }
@@ -215,7 +209,7 @@ class _Hud extends StatelessWidget {
           _hudRow(Icons.speed,          Colors.greenAccent,
               '${fps.toStringAsFixed(1)} FPS'),
           const SizedBox(height: 2),
-          _hudRow(Icons.timer_outlined, Colors.amberAccent, '$inferMs ms'),
+          _hudRow(Icons.timer_outlined, Colors.blue, '$inferMs ms'),
           const SizedBox(height: 2),
           Text('$count object${count == 1 ? '' : 's'}',
               style: const TextStyle(color: Colors.white60, fontSize: 11)),
@@ -236,46 +230,3 @@ class _Hud extends StatelessWidget {
   );
 }
 
-// ── Bottom strip ──────────────────────────────────────────────────────────────
-
-class _BottomStrip extends StatelessWidget {
-  final List<Detection> detections;
-  const _BottomStrip({required this.detections});
-
-  @override
-  Widget build(BuildContext context) {
-    // Sort is O(n log n) but n is typically < 10; no perf concern.
-    final sorted = [...detections]
-      ..sort((a, b) => b.confidence.compareTo(a.confidence));
-
-    return Container(
-      height: 52,
-      color: Colors.black.withValues(alpha: 0.55),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: sorted.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (_, i) {
-          final d     = sorted[i];
-          final color = colorForLabel(d.label);
-          return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color:  color.withValues(alpha: 0.20),
-              border: Border.all(color: color.withValues(alpha: 0.70)),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              '${d.label}  ${(d.confidence * 100).toStringAsFixed(0)}%',
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}

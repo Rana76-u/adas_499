@@ -120,7 +120,7 @@ void drawDetections(
     if (showMonocularDistance) {
       final dist = estimateDistanceMeters(
         boxHeightNorm: bb.height,
-        realObjectHeightM: defaultObjectHeightMeters(det.label),
+        label: det.label,
       );
       if (dist.isFinite && dist > 0.3 && dist < 250) {
         line += '  D:${dist.toStringAsFixed(1)}m';

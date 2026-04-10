@@ -7,13 +7,14 @@ import 'dart:ui';
 /// \( D = \frac{H \cdot f}{h_{\mathrm{norm}} \cdot S} \).
 double estimateDistanceMeters({
   required double boxHeightNorm,
-  double realObjectHeightM = 1.65,
-  double focalLengthMm = 5.37,
-  double sensorHeightMm = 5.32,
+  required String label,
+  double focalLengthMm = 4.84,
+  double sensorHeightMm = 4.33,
 }) {
   if (boxHeightNorm <= 1e-6 || sensorHeightMm <= 1e-6) {
     return double.infinity;
   }
+  final realObjectHeightM = defaultObjectHeightMeters(label);
   return (realObjectHeightM * focalLengthMm) / (boxHeightNorm * sensorHeightMm);
 }
 
@@ -21,18 +22,19 @@ double estimateDistanceMeters({
 double defaultObjectHeightMeters(String label) {
   final k = label.toLowerCase();
   const m = {
-    'person': 1.65,
-    'bicycle': 1.0,
+    'person': 1.67,
+    'bicycle': 0.8,
     'car': 1.5,
-    'motorcycle': 1.2,
+    'motorcycle': 0.8,
     'bus': 3.0,
     'truck': 3.2,
-    'rickshaw': 1.6,
+    'rickshaw': 1.75,
+    'other-vehicle': 1.75,
     'cng': 1.5,
     'dog': 0.5,
     'cat': 0.25,
   };
-  return m[k] ?? 1.5;
+  return m[k] ?? 1.67;
 }
 
 /// ASCII direction buckets from `get_direction` in [assets/code.ipynb].
