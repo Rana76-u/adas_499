@@ -183,6 +183,7 @@ class _FullscreenDetectionPainter extends CustomPainter {
     drawTrailsAndPredictedPaths(canvas, rect, detections, trailNormByTrack);
     drawDetections(canvas, detections, rect, showMonocularDistance: true);
     drawVelocityArrowsAndLabels(canvas, rect, detections);
+    drawRiskOverlay(canvas, rect, detections);
   }
 
   @override

@@ -64,6 +64,22 @@ final _velPaint = Paint()
   ..strokeCap = StrokeCap.round
   ..color = const Color(0xFFFF0000);
 
+final _riskHighPaint = Paint()
+  ..strokeWidth = 2.5
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round
+  ..color = const Color(0xFFFF0000); // RED
+final _riskMedPaint = Paint()
+  ..strokeWidth = 2.5
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round
+  ..color = const Color(0xFFFFA500); // ORANGE
+final _riskLowPaint = Paint()
+  ..strokeWidth = 2.0
+  ..style = PaintingStyle.stroke
+  ..strokeCap = StrokeCap.round
+  ..color = const Color(0xFFFFFF00); // YELLOW
+
 const int _kPredictionSteps = 15;
 
 // ── Core drawing helpers ──────────────────────────────────────────────────────
@@ -190,6 +206,95 @@ void drawVelocityArrowsAndLabels(
       displayRect.left + bb.left * displayRect.width,
       displayRect.top + bb.bottom * displayRect.height + 4,
     ));
+  }
+}
+
+/// Notebook-style risk visualization using TTC and pixel distance.
+///
+/// Camera is assumed at bottom-center of [displayRect], mirroring
+/// `cam_pos = (w // 2, h)` in the notebook.
+void drawRiskOverlay(
+  Canvas canvas,
+  ui.Rect displayRect,
+  List<Detection> detections, {
+  double ttcThresholdSeconds = 2.0,
+  double collisionDistPixels = 100,
+}) {
+  if (detections.isEmpty) return;
+
+  final camNorm = const Offset(0.5, 1.0);
+  final camPx = Offset(
+    displayRect.left + camNorm.dx * displayRect.width,
+    displayRect.top + camNorm.dy * displayRect.height,
+  );
+
+  for (final det in detections) {
+    if (!det.hasTrackId) continue;
+
+    final bb = det.boundingBox;
+    final cx = (bb.left + bb.right) / 2;
+    final cy = (bb.top + bb.bottom) / 2;
+    final centerNorm = Offset(cx, cy);
+    final centerPx = Offset(
+      displayRect.left + cx * displayRect.width,
+      displayRect.top + cy * displayRect.height,
+    );
+
+    final velNorm = Offset(det.vxNormPerSec, det.vyNormPerSec);
+    final ttc = calcCameraTtcNorm(
+      objPosNorm: centerNorm,
+      velNormPerSec: velNorm,
+      camPosNorm: camNorm,
+    );
+
+    final dxPx = centerPx.dx - camPx.dx;
+    final dyPx = centerPx.dy - camPx.dy;
+    final distPx = math.sqrt(dxPx * dxPx + dyPx * dyPx);
+
+    String? level;
+    if (ttc != null && ttc < ttcThresholdSeconds) {
+      if (ttc < 0.5) {
+        level = 'HIGH';
+      } else if (ttc < 1.0) {
+        level = 'MEDIUM';
+      } else {
+        level = 'LOW';
+      }
+    } else if (distPx < collisionDistPixels) {
+      level = 'MEDIUM';
+    }
+
+    if (level != null) {
+      final paint = switch (level) {
+        'HIGH' => _riskHighPaint,
+        'MEDIUM' => _riskMedPaint,
+        _ => _riskLowPaint,
+      };
+
+      canvas.drawLine(camPx, centerPx, paint);
+
+      final mid = Offset(
+        (camPx.dx + centerPx.dx) / 2,
+        (camPx.dy + centerPx.dy) / 2,
+      );
+
+      var txt = '$level RISK';
+      if (ttc != null) {
+        txt += ' (${ttc.toStringAsFixed(1)}s)';
+      }
+      _drawSubLabel(canvas, txt, mid.translate(-20, -6));
+    }
+
+    if (ttc != null) {
+      _drawSubLabel(
+        canvas,
+        'TTC:${ttc.toStringAsFixed(1)}s',
+        Offset(
+          displayRect.left + bb.left * displayRect.width,
+          displayRect.top + bb.bottom * displayRect.height + 18,
+        ),
+      );
+    }
   }
 }
 

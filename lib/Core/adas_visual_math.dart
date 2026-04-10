@@ -74,3 +74,25 @@ List<Offset> predictTrajectoryNorm(List<Offset> history, int predictionSteps) {
     (k) => Offset(last.dx + mx * (k + 1), last.dy + my * (k + 1)),
   );
 }
+
+/// `calc_camera_ttc` ported from the notebook, but in normalized coordinates.
+///
+/// [objPosNorm] and [camPosNorm] are in [0,1]x[0,1] space, [velNormPerSec] is
+/// normalized velocity per second (as emitted by native).
+double? calcCameraTtcNorm({
+  required Offset objPosNorm,
+  required Offset velNormPerSec,
+  required Offset camPosNorm,
+  double eps = 1e-6,
+}) {
+  final rx = objPosNorm.dx - camPosNorm.dx;
+  final ry = objPosNorm.dy - camPosNorm.dy;
+  final rvx = velNormPerSec.dx;
+  final rvy = velNormPerSec.dy;
+
+  final v2 = rvx * rvx + rvy * rvy;
+  if (v2 < eps) return null;
+
+  final ttc = -(rx * rvx + ry * rvy) / v2;
+  return ttc > 0 ? ttc : null;
+}
