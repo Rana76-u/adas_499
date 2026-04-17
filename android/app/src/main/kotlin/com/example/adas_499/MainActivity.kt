@@ -8,7 +8,6 @@ import android.util.Log
 import android.view.Surface
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import io.flutter.embedding.android.FlutterActivity
@@ -128,8 +127,6 @@ class MainActivity : FlutterActivity() {
                     "startCamera" -> {
                         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                             != PackageManager.PERMISSION_GRANTED) {
-                            ActivityCompat.requestPermissions(
-                                this, arrayOf(Manifest.permission.CAMERA), 100)
                             result.error("NO_PERMISSION", "Camera permission not granted", null)
                         } else {
                             startCamera()

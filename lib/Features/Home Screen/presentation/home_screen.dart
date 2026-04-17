@@ -1,4 +1,4 @@
-import 'package:adas_499/Features/Live%20Camera%20Screen/camera_screen.dart';
+import 'package:adas_499/Features/Live%20Camera%20Screen/live_camera_permission_gate.dart';
 import 'package:adas_499/Features/Settings%20Screen/settings_screen.dart';
 import 'package:adas_499/Shared/custom_appbar.dart';
 import 'package:flutter/material.dart';
@@ -136,8 +136,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return IndexedStack(
       index: _selectedTab,
       children: [
-        // Live camera tab now uses the native pipeline
-        LiveCameraScreen(bridge: _bridge),
+        // Gate camera screen behind explicit permission handling.
+        LiveCameraPermissionGate(bridge: _bridge),
         // Image tab still works the same way
         SettingsScreen(),
       ],
