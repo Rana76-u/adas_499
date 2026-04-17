@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
+import 'package:vibration/vibration.dart';
 
 import '../../Core/detection_painter.dart';
 import '../../Core/native_detection_bridge.dart';
@@ -28,6 +31,14 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   int    _inferMs = 0;
   String? _error;
   int?    _textureId;
+  RiskAssessment _riskAssessment =
+      const RiskAssessment(overall: RiskLevel.none, byTrackId: {});
+  RiskLevel _lastMediumOrHigherAlert = RiskLevel.none;
+  Timer? _highRiskAlertTimer;
+  Timer? _highRiskFlashTimer;
+  bool _highRiskFlashOn = true;
+  bool _highRiskToneActive = false;
+  final FlutterRingtonePlayer _ringtonePlayer = FlutterRingtonePlayer();
 
   @override
   void initState() {
@@ -64,7 +75,86 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       _fps        = frame.fps;
       _inferMs    = frame.inferMs;
       _updateTrails(frame.detections);
+      _riskAssessment = assessRiskLevels(
+        frame.detections,
+        const ui.Rect.fromLTWH(0, 0, 1, 1),
+      );
     });
+    _updateRiskAlerts(_riskAssessment.overall);
+  }
+
+  void _updateRiskAlerts(RiskLevel currentRisk) {
+    if (currentRisk == RiskLevel.high) {
+      _startHighRiskLoop();
+      return;
+    }
+
+    _stopHighRiskLoop();
+    if (currentRisk == RiskLevel.medium &&
+        _lastMediumOrHigherAlert != RiskLevel.medium) {
+      // Medium risk: one short beep + light haptic pulse.
+      _playMediumAlert();
+    }
+    _lastMediumOrHigherAlert = currentRisk;
+  }
+
+  void _startHighRiskLoop() {
+    if (!_highRiskToneActive) {
+      _ringtonePlayer.play(
+        android: AndroidSounds.alarm,
+        ios: IosSounds.alarm,
+        looping: true,
+        volume: 1.0,
+        asAlarm: true,
+      );
+      _highRiskToneActive = true;
+    }
+
+    if (_highRiskAlertTimer == null) {
+      _highRiskAlertTimer = Timer.periodic(const Duration(milliseconds: 350), (_) {
+        // High risk: rapid haptic pulses while alarm tone loops.
+        _vibrate(durationMs: 120, amplitude: 200);
+      });
+      _lastMediumOrHigherAlert = RiskLevel.high;
+    }
+    _highRiskFlashTimer ??= Timer.periodic(const Duration(milliseconds: 260), (_) {
+        if (!mounted) return;
+        setState(() => _highRiskFlashOn = !_highRiskFlashOn);
+      });
+  }
+
+  void _stopHighRiskLoop() {
+    _highRiskAlertTimer?.cancel();
+    _highRiskAlertTimer = null;
+    _highRiskFlashTimer?.cancel();
+    _highRiskFlashTimer = null;
+    if (_highRiskFlashOn == false && mounted) {
+      setState(() => _highRiskFlashOn = true);
+    } else {
+      _highRiskFlashOn = true;
+    }
+    if (_highRiskToneActive) {
+      _ringtonePlayer.stop();
+      _highRiskToneActive = false;
+    }
+    Vibration.cancel();
+  }
+
+  Future<void> _playMediumAlert() async {
+    _ringtonePlayer.play(
+      android: AndroidSounds.notification,
+      ios: IosSounds.glass,
+      looping: false,
+      volume: 0.85,
+      asAlarm: false,
+    );
+    await _vibrate(durationMs: 90, amplitude: 120);
+  }
+
+  Future<void> _vibrate({required int durationMs, required int amplitude}) async {
+    final hasVibrator = await Vibration.hasVibrator() ?? false;
+    if (!hasVibrator) return;
+    await Vibration.vibrate(duration: durationMs, amplitude: amplitude);
   }
 
   void _updateTrails(List<Detection> dets) {
@@ -89,6 +179,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
+      _stopHighRiskLoop();
       widget.bridge.stopCamera();
     } else if (state == AppLifecycleState.resumed) {
       setState(() => _textureId = null);
@@ -99,6 +190,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _stopHighRiskLoop();
     widget.bridge.stopCamera();
     super.dispose();
   }
@@ -145,6 +237,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
               painter: _FullscreenDetectionPainter(
                 detections: _detections,
                 trailNormByTrack: _trailNormByTrack,
+                riskAssessment: _riskAssessment,
+                highRiskFlashOn: _highRiskFlashOn,
               ),
             ),
           ),
@@ -153,7 +247,12 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
         // HUD — light widget, doesn't need its own boundary
         Positioned(
           top: 12, right: 12,
-          child: _Hud(fps: _fps, inferMs: _inferMs, count: _detections.length),
+          child: _Hud(
+            fps: _fps,
+            inferMs: _inferMs,
+            count: _detections.length,
+            risk: _riskAssessment.overall,
+          ),
         ),
       ],
     );
@@ -165,17 +264,28 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
 class _FullscreenDetectionPainter extends CustomPainter {
   final List<Detection> detections;
   final Map<int, List<ui.Offset>> trailNormByTrack;
+  final RiskAssessment riskAssessment;
+  final bool highRiskFlashOn;
 
   const _FullscreenDetectionPainter({
     required this.detections,
     required this.trailNormByTrack,
+    required this.riskAssessment,
+    required this.highRiskFlashOn,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     final rect = ui.Rect.fromLTWH(0, 0, size.width, size.height);
     drawTrailsAndPredictedPaths(canvas, rect, detections, trailNormByTrack);
-    drawDetections(canvas, detections, rect, showMonocularDistance: true);
+    drawDetections(
+      canvas,
+      detections,
+      rect,
+      showMonocularDistance: true,
+      riskByTrackId: riskAssessment.byTrackId,
+      highRiskFlashOn: highRiskFlashOn,
+    );
     drawVelocityArrowsAndLabels(canvas, rect, detections);
     drawRiskOverlay(canvas, rect, detections);
   }
@@ -183,7 +293,9 @@ class _FullscreenDetectionPainter extends CustomPainter {
   @override
   bool shouldRepaint(_FullscreenDetectionPainter old) =>
       !identical(old.detections, detections) ||
-      !identical(old.trailNormByTrack, trailNormByTrack);
+      !identical(old.trailNormByTrack, trailNormByTrack) ||
+      !identical(old.riskAssessment, riskAssessment) ||
+      old.highRiskFlashOn != highRiskFlashOn;
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
@@ -192,7 +304,13 @@ class _Hud extends StatelessWidget {
   final double fps;
   final int    inferMs;
   final int    count;
-  const _Hud({required this.fps, required this.inferMs, required this.count});
+  final RiskLevel risk;
+  const _Hud({
+    required this.fps,
+    required this.inferMs,
+    required this.count,
+    required this.risk,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -213,6 +331,20 @@ class _Hud extends StatelessWidget {
           const SizedBox(height: 2),
           Text('$count object${count == 1 ? '' : 's'}',
               style: const TextStyle(color: Colors.white60, fontSize: 11)),
+          const SizedBox(height: 2),
+          Text(
+            'Risk: ${risk.name.toUpperCase()}',
+            style: TextStyle(
+              color: switch (risk) {
+                RiskLevel.high => Colors.redAccent,
+                RiskLevel.medium => Colors.orangeAccent,
+                RiskLevel.low => Colors.yellowAccent,
+                RiskLevel.none => Colors.white54,
+              },
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );

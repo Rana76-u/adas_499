@@ -81,6 +81,83 @@ final _riskLowPaint = Paint()
   ..color = const Color(0xFFFFFF00); // YELLOW
 
 const int _kPredictionSteps = 15;
+const double _kRiskTtcThresholdSeconds = 2.0;
+const double _kRiskCollisionDistPixels = 100;
+
+enum RiskLevel { none, low, medium, high }
+
+class RiskAssessment {
+  final RiskLevel overall;
+  final Map<int, RiskLevel> byTrackId;
+
+  const RiskAssessment({
+    required this.overall,
+    required this.byTrackId,
+  });
+}
+
+RiskAssessment assessRiskLevels(
+  List<Detection> detections,
+  ui.Rect displayRect, {
+  double ttcThresholdSeconds = _kRiskTtcThresholdSeconds,
+  double collisionDistPixels = _kRiskCollisionDistPixels,
+}) {
+  if (detections.isEmpty) {
+    return const RiskAssessment(overall: RiskLevel.none, byTrackId: {});
+  }
+
+  final byTrack = <int, RiskLevel>{};
+  var overall = RiskLevel.none;
+  final camNorm = const Offset(0.5, 1.0);
+  final camPx = Offset(
+    displayRect.left + camNorm.dx * displayRect.width,
+    displayRect.top + camNorm.dy * displayRect.height,
+  );
+
+  for (final det in detections) {
+    final bb = det.boundingBox;
+    final cx = (bb.left + bb.right) / 2;
+    final cy = (bb.top + bb.bottom) / 2;
+    final centerNorm = Offset(cx, cy);
+    final centerPx = Offset(
+      displayRect.left + cx * displayRect.width,
+      displayRect.top + cy * displayRect.height,
+    );
+    final velNorm = Offset(det.vxNormPerSec, det.vyNormPerSec);
+    final ttc = calcCameraTtcNorm(
+      objPosNorm: centerNorm,
+      velNormPerSec: velNorm,
+      camPosNorm: camNorm,
+    );
+    final dxPx = centerPx.dx - camPx.dx;
+    final dyPx = centerPx.dy - camPx.dy;
+    final distPx = math.sqrt(dxPx * dxPx + dyPx * dyPx);
+
+    var level = RiskLevel.none;
+    if (ttc != null && ttc < ttcThresholdSeconds) {
+      if (ttc < 0.5) {
+        level = RiskLevel.high;
+      } else if (ttc < 1.0) {
+        level = RiskLevel.medium;
+      } else {
+        level = RiskLevel.low;
+      }
+    } else if (distPx < collisionDistPixels) {
+      level = RiskLevel.medium;
+    }
+
+    if (level != RiskLevel.none) {
+      if (det.hasTrackId) {
+        byTrack[det.trackId] = level;
+      }
+      if (level.index > overall.index) {
+        overall = level;
+      }
+    }
+  }
+
+  return RiskAssessment(overall: overall, byTrackId: byTrack);
+}
 
 // ── Core drawing helpers ──────────────────────────────────────────────────────
 
@@ -95,9 +172,19 @@ void drawDetections(
   List<Detection> detections,
   ui.Rect displayRect, {
   bool showMonocularDistance = false,
+  Map<int, RiskLevel> riskByTrackId = const {},
+  bool highRiskFlashOn = true,
 }) {
   for (final det in detections) {
-    final color = colorForLabel(det.label);
+    final riskLevel = det.hasTrackId ? riskByTrackId[det.trackId] : null;
+    final color = switch (riskLevel) {
+      RiskLevel.high => highRiskFlashOn
+          ? const Color(0xFFFF0000)
+          : const Color(0xFFFF5A5A),
+      RiskLevel.medium => const Color(0xFFFFA500),
+      RiskLevel.low => const Color(0xFFFFFF00),
+      _ => colorForLabel(det.label),
+    };
     final bb = det.boundingBox;
 
     final l = displayRect.left + bb.left   * displayRect.width;
@@ -133,6 +220,16 @@ void drawDetections(
       color,
       above: t >= 28,
     );
+
+    // Keep low-risk warning subtle: add a compact warning icon only.
+    if (riskLevel == RiskLevel.low) {
+      _drawSubLabelColored(
+        canvas,
+        '⚠',
+        Offset(r + 4, t - 2),
+        const Color(0xFFFFFF00),
+      );
+    }
   }
 }
 
@@ -217,10 +314,17 @@ void drawRiskOverlay(
   Canvas canvas,
   ui.Rect displayRect,
   List<Detection> detections, {
-  double ttcThresholdSeconds = 2.0,
-  double collisionDistPixels = 100,
+  double ttcThresholdSeconds = _kRiskTtcThresholdSeconds,
+  double collisionDistPixels = _kRiskCollisionDistPixels,
 }) {
   if (detections.isEmpty) return;
+  final risk = assessRiskLevels(
+    detections,
+    displayRect,
+    ttcThresholdSeconds: ttcThresholdSeconds,
+    collisionDistPixels: collisionDistPixels,
+  );
+  if (risk.byTrackId.isEmpty) return;
 
   final camNorm = const Offset(0.5, 1.0);
   final camPx = Offset(
@@ -230,6 +334,8 @@ void drawRiskOverlay(
 
   for (final det in detections) {
     if (!det.hasTrackId) continue;
+    final level = risk.byTrackId[det.trackId];
+    if (level == null || level == RiskLevel.none) continue;
 
     final bb = det.boundingBox;
     final cx = (bb.left + bb.right) / 2;
@@ -247,43 +353,25 @@ void drawRiskOverlay(
       camPosNorm: camNorm,
     );
 
-    final dxPx = centerPx.dx - camPx.dx;
-    final dyPx = centerPx.dy - camPx.dy;
-    final distPx = math.sqrt(dxPx * dxPx + dyPx * dyPx);
+    final paint = switch (level) {
+      RiskLevel.high => _riskHighPaint,
+      RiskLevel.medium => _riskMedPaint,
+      RiskLevel.low => _riskLowPaint,
+      _ => _riskLowPaint,
+    };
 
-    String? level;
-    if (ttc != null && ttc < ttcThresholdSeconds) {
-      if (ttc < 0.5) {
-        level = 'HIGH';
-      } else if (ttc < 1.0) {
-        level = 'MEDIUM';
-      } else {
-        level = 'LOW';
-      }
-    } else if (distPx < collisionDistPixels) {
-      level = 'MEDIUM';
+    canvas.drawLine(camPx, centerPx, paint);
+
+    final mid = Offset(
+      (camPx.dx + centerPx.dx) / 2,
+      (camPx.dy + centerPx.dy) / 2,
+    );
+
+    var txt = '${level.name.toUpperCase()} RISK';
+    if (ttc != null) {
+      txt += ' (${ttc.toStringAsFixed(1)}s)';
     }
-
-    if (level != null) {
-      final paint = switch (level) {
-        'HIGH' => _riskHighPaint,
-        'MEDIUM' => _riskMedPaint,
-        _ => _riskLowPaint,
-      };
-
-      canvas.drawLine(camPx, centerPx, paint);
-
-      final mid = Offset(
-        (camPx.dx + centerPx.dx) / 2,
-        (camPx.dy + centerPx.dy) / 2,
-      );
-
-      var txt = '$level RISK';
-      if (ttc != null) {
-        txt += ' (${ttc.toStringAsFixed(1)}s)';
-      }
-      _drawSubLabel(canvas, txt, mid.translate(-20, -6));
-    }
+    _drawSubLabel(canvas, txt, mid.translate(-20, -6));
 
     if (ttc != null) {
       final ttcColor = ttc > 2.0

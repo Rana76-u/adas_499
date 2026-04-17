@@ -29,7 +29,7 @@ class CustomAppbar extends StatelessWidget implements PreferredSizeWidget{
             ),
             const SizedBox(width: 10),
             const Text(
-              'YOLO Detector',
+              'DriveAid',
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.w700,
@@ -66,7 +66,7 @@ class CustomAppbar extends StatelessWidget implements PreferredSizeWidget{
                 ),
                 const SizedBox(width: 5),
                 Text(
-                  _modelLoaded ? 'YOLOv8n' : 'Loading',
+                  _modelLoaded ? 'Active' : 'Loading',
                   style: TextStyle(
                     color: _modelLoaded ? Colors.greenAccent : Colors.redAccent,
                     fontSize: 11,
