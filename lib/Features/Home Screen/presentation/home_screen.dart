@@ -56,35 +56,109 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
     return Scaffold(
-      appBar: CustomAppbar(modelLoaded: _modelLoaded) as PreferredSizeWidget,
-      body: _buildBody(),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedTab,
-        onTap: (i) {
-          setState(() {
-            _selectedTab = i;
-            if (i != 0) {
-              // Leave Live Feed => immediately stop inference.
-              _isInferenceOn = false;
-            }
-          });
-        },
-        backgroundColor: const Color(0xFF0D0D1F),
-        selectedItemColor: const Color(0xFF1A73E8),
-        unselectedItemColor: Colors.white38,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.videocam_rounded),
-            label: 'Live Feed',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings_rounded),
-            label: 'Settings',
+      appBar:
+          isLandscape
+              ? null
+              : CustomAppbar(modelLoaded: _modelLoaded) as PreferredSizeWidget,
+      body: isLandscape ? _buildLandscapeLayout() : _buildBody(),
+      bottomNavigationBar: isLandscape ? null : _buildBottomNavigationBar(),
+    );
+  }
+
+  Widget _buildLandscapeLayout() {
+    return SafeArea(
+      child: Row(
+        children: [
+          Expanded(child: _buildBody()),
+          Container(
+            width: 72,
+            decoration: const BoxDecoration(
+              color: Color(0xCC0D0D1F),
+              border: Border(left: BorderSide(color: Colors.white12)),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _buildSideRailButton(
+                  icon: Icons.videocam_rounded,
+                  tooltip: 'Live Feed',
+                  selected: _selectedTab == 0,
+                  onTap: () => _onTabSelected(0),
+                ),
+                const SizedBox(height: 16),
+                _buildSideRailButton(
+                  icon: Icons.settings_rounded,
+                  tooltip: 'Settings',
+                  selected: _selectedTab == 1,
+                  onTap: () => _onTabSelected(1),
+                ),
+              ],
+            ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildSideRailButton({
+    required IconData icon,
+    required String tooltip,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF1A73E8) : Colors.transparent,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected ? const Color(0xFF1A73E8) : Colors.white24,
+            ),
+          ),
+          child: Icon(icon, color: selected ? Colors.white : Colors.white70),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomNavigationBar() {
+    return BottomNavigationBar(
+      currentIndex: _selectedTab,
+      onTap: _onTabSelected,
+      backgroundColor: const Color(0xFF0D0D1F),
+      selectedItemColor: const Color(0xFF1A73E8),
+      unselectedItemColor: Colors.white38,
+      items: const [
+        BottomNavigationBarItem(
+          icon: Icon(Icons.videocam_rounded),
+          label: 'Live Feed',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(Icons.settings_rounded),
+          label: 'Settings',
+        ),
+      ],
+    );
+  }
+
+  void _onTabSelected(int i) {
+    setState(() {
+      _selectedTab = i;
+      if (i != 0) {
+        // Leave Live Feed => immediately stop inference.
+        _isInferenceOn = false;
+      }
+    });
   }
 
   Widget _buildBody() {

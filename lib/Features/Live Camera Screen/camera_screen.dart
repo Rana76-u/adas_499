@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
@@ -288,15 +289,23 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       );
     }
 
+    final int cameraQuarterTurns = Platform.isAndroid ? 3 : 0;
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (_textureId != null)
-          // Native preview — wrap in RepaintBoundary so the texture compositing
-          // layer is isolated; Flutter won't re-rasterize it when overlays change.
-          RepaintBoundary(child: Texture(textureId: _textureId!))
-        else
-          const ColoredBox(color: Colors.black),
+        Positioned.fill(
+          child:
+              _textureId != null
+                  // Rotate only preview texture; detections remain in native display space.
+                  ? RepaintBoundary(
+                    child: RotatedBox(
+                      quarterTurns: cameraQuarterTurns,
+                      child: Texture(textureId: _textureId!),
+                    ),
+                  )
+                  : const ColoredBox(color: Colors.black),
+        ),
 
         // Bounding-box overlay — kept in its own RepaintBoundary so the
         // raster cache for the Texture is NOT invalidated on every detection.
@@ -310,18 +319,6 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
                 highRiskFlashOn: _highRiskFlashOn,
               ),
             ),
-          ),
-        ),
-
-        // HUD — light widget, doesn't need its own boundary
-        Positioned(
-          top: 12,
-          right: 12,
-          child: _Hud(
-            fps: _fps,
-            inferMs: _inferMs,
-            count: _detections.length,
-            risk: _riskAssessment.overall,
           ),
         ),
         if (_textureId == null)
@@ -341,6 +338,17 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
               ],
             ),
           ),
+        // HUD — light widget, doesn't need its own boundary
+        Positioned(
+          top: 12,
+          right: 12,
+          child: _Hud(
+            fps: _fps,
+            inferMs: _inferMs,
+            count: _detections.length,
+            risk: _riskAssessment.overall,
+          ),
+        ),
         Positioned(
           left: 12,
           bottom: 20,

@@ -264,14 +264,17 @@ class MainActivity : FlutterActivity() {
 
     private fun bindCamera(provider: ProcessCameraProvider) {
         provider.unbindAll()
+        val targetRotation = display?.rotation ?: Surface.ROTATION_0
 
         previewUseCase = Preview.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(targetRotation)
             .build()
             .also { it.setSurfaceProvider(previewSurfaceProvider) }
 
         val imageAnalysis = ImageAnalysis.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(targetRotation)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
@@ -292,7 +295,7 @@ class MainActivity : FlutterActivity() {
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 previewUseCase!!,
                 imageAnalysis)
-            Log.i(TAG, "✅ Camera bound")
+            Log.i(TAG, "✅ Camera bound (rotation=$targetRotation)")
         } catch (e: Exception) {
             Log.e(TAG, "Camera bind failed: ${e.message}", e)
         }
