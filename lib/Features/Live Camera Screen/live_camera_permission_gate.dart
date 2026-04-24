@@ -8,8 +8,17 @@ import 'camera_screen.dart';
 
 class LiveCameraPermissionGate extends StatefulWidget {
   final NativeDetectionBridge bridge;
+  final bool inferenceEnabled;
+  final bool controlsEnabled;
+  final ValueChanged<bool> onInferenceChanged;
 
-  const LiveCameraPermissionGate({super.key, required this.bridge});
+  const LiveCameraPermissionGate({
+    super.key,
+    required this.bridge,
+    required this.inferenceEnabled,
+    required this.controlsEnabled,
+    required this.onInferenceChanged,
+  });
 
   @override
   State<LiveCameraPermissionGate> createState() =>
@@ -116,7 +125,12 @@ class _LiveCameraPermissionGateState extends State<LiveCameraPermissionGate>
     }
 
     if (_granted) {
-      return LiveCameraScreen(bridge: widget.bridge);
+      return LiveCameraScreen(
+        bridge: widget.bridge,
+        inferenceEnabled: widget.inferenceEnabled,
+        controlsEnabled: widget.controlsEnabled,
+        onInferenceChanged: widget.onInferenceChanged,
+      );
     }
 
     return Center(

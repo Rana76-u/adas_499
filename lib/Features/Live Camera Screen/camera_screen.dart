@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:vibration/vibration.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../Core/detection_painter.dart';
 import '../../Core/native_detection_bridge.dart';
@@ -15,7 +16,16 @@ import '../../Core/yolo_model.dart';
 /// Dart only receives final bounding-box data through the EventChannel.
 class LiveCameraScreen extends StatefulWidget {
   final NativeDetectionBridge bridge;
-  const LiveCameraScreen({super.key, required this.bridge});
+  final bool inferenceEnabled;
+  final bool controlsEnabled;
+  final ValueChanged<bool> onInferenceChanged;
+  const LiveCameraScreen({
+    super.key,
+    required this.bridge,
+    required this.inferenceEnabled,
+    required this.controlsEnabled,
+    required this.onInferenceChanged,
+  });
 
   @override
   State<LiveCameraScreen> createState() => _LiveCameraScreenState();
@@ -23,37 +33,48 @@ class LiveCameraScreen extends StatefulWidget {
 
 class _LiveCameraScreenState extends State<LiveCameraScreen>
     with WidgetsBindingObserver {
-
   List<Detection> _detections = const [];
+
   /// Per-track normalized center history (see notebook `track_history`, maxlen 30).
   Map<int, List<ui.Offset>> _trailNormByTrack = {};
-  double _fps     = 0;
-  int    _inferMs = 0;
+  double _fps = 0;
+  int _inferMs = 0;
   String? _error;
-  int?    _textureId;
-  RiskAssessment _riskAssessment =
-      const RiskAssessment(overall: RiskLevel.none, byTrackId: {});
+  int? _textureId;
+  RiskAssessment _riskAssessment = const RiskAssessment(
+    overall: RiskLevel.none,
+    byTrackId: {},
+  );
   RiskLevel _lastMediumOrHigherAlert = RiskLevel.none;
   Timer? _highRiskAlertTimer;
   Timer? _highRiskFlashTimer;
   bool _highRiskFlashOn = true;
   bool _highRiskToneActive = false;
   final FlutterRingtonePlayer _ringtonePlayer = FlutterRingtonePlayer();
+  StreamSubscription<NativeFrame>? _detectionSub;
+  bool _cameraStarting = false;
+  bool _cameraStopping = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _startNativeCamera();
+    if (widget.inferenceEnabled) {
+      _startNativeCamera();
+    }
   }
 
   Future<void> _startNativeCamera() async {
+    if (_cameraStarting || _textureId != null) return;
     try {
+      _cameraStarting = true;
       final textureId = await widget.bridge.startCamera();
       if (!mounted) return;
       setState(() => _textureId = textureId);
+      await _setKeepAwake(true);
 
-      widget.bridge.detectionStream.listen(
+      _detectionSub?.cancel();
+      _detectionSub = widget.bridge.detectionStream.listen(
         _onFrame,
         onError: (e) {
           if (mounted) setState(() => _error = e.toString());
@@ -61,6 +82,41 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       );
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
+    } finally {
+      _cameraStarting = false;
+    }
+  }
+
+  Future<void> _stopNativeCamera() async {
+    if (_cameraStopping) return;
+    _cameraStopping = true;
+    try {
+      await _detectionSub?.cancel();
+      _detectionSub = null;
+      await widget.bridge.stopCamera();
+    } finally {
+      await _setKeepAwake(false);
+      _cameraStopping = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _textureId = null;
+      _detections = const [];
+      _fps = 0;
+      _inferMs = 0;
+      _trailNormByTrack = {};
+      _riskAssessment = const RiskAssessment(
+        overall: RiskLevel.none,
+        byTrackId: {},
+      );
+    });
+  }
+
+  Future<void> _setKeepAwake(bool enabled) async {
+    if (enabled) {
+      await WakelockPlus.enable();
+    } else {
+      await WakelockPlus.disable();
     }
   }
 
@@ -72,8 +128,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     // Each setState triggers one raster frame; this is already cheap.
     setState(() {
       _detections = frame.detections;
-      _fps        = frame.fps;
-      _inferMs    = frame.inferMs;
+      _fps = frame.fps;
+      _inferMs = frame.inferMs;
       _updateTrails(frame.detections);
       _riskAssessment = assessRiskLevels(
         frame.detections,
@@ -111,16 +167,20 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     }
 
     if (_highRiskAlertTimer == null) {
-      _highRiskAlertTimer = Timer.periodic(const Duration(milliseconds: 350), (_) {
+      _highRiskAlertTimer = Timer.periodic(const Duration(milliseconds: 350), (
+        _,
+      ) {
         // High risk: rapid haptic pulses while alarm tone loops.
         _vibrate(durationMs: 120, amplitude: 200);
       });
       _lastMediumOrHigherAlert = RiskLevel.high;
     }
-    _highRiskFlashTimer ??= Timer.periodic(const Duration(milliseconds: 260), (_) {
-        if (!mounted) return;
-        setState(() => _highRiskFlashOn = !_highRiskFlashOn);
-      });
+    _highRiskFlashTimer ??= Timer.periodic(const Duration(milliseconds: 260), (
+      _,
+    ) {
+      if (!mounted) return;
+      setState(() => _highRiskFlashOn = !_highRiskFlashOn);
+    });
   }
 
   void _stopHighRiskLoop() {
@@ -151,8 +211,11 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     await _vibrate(durationMs: 90, amplitude: 120);
   }
 
-  Future<void> _vibrate({required int durationMs, required int amplitude}) async {
-    final hasVibrator = await Vibration.hasVibrator() ?? false;
+  Future<void> _vibrate({
+    required int durationMs,
+    required int amplitude,
+  }) async {
+    final hasVibrator = await Vibration.hasVibrator();
     if (!hasVibrator) return;
     await Vibration.vibrate(duration: durationMs, amplitude: amplitude);
   }
@@ -180,10 +243,24 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
       _stopHighRiskLoop();
-      widget.bridge.stopCamera();
+      _stopNativeCamera();
     } else if (state == AppLifecycleState.resumed) {
-      setState(() => _textureId = null);
-      _startNativeCamera();
+      if (widget.inferenceEnabled) {
+        _startNativeCamera();
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant LiveCameraScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.inferenceEnabled != widget.inferenceEnabled) {
+      if (widget.inferenceEnabled) {
+        _startNativeCamera();
+      } else {
+        _stopHighRiskLoop();
+        _stopNativeCamera();
+      }
     }
   }
 
@@ -191,7 +268,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _stopHighRiskLoop();
-    widget.bridge.stopCamera();
+    unawaited(_stopNativeCamera());
+    _detectionSub = null;
     super.dispose();
   }
 
@@ -201,23 +279,11 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(_error!,
-              style: const TextStyle(color: Colors.redAccent),
-              textAlign: TextAlign.center),
-        ),
-      );
-    }
-
-    if (_textureId == null) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Color(0xFF1A73E8)),
-            SizedBox(height: 16),
-            Text('Starting camera…',
-                style: TextStyle(color: Colors.white54, fontSize: 13)),
-          ],
+          child: Text(
+            _error!,
+            style: const TextStyle(color: Colors.redAccent),
+            textAlign: TextAlign.center,
+          ),
         ),
       );
     }
@@ -225,9 +291,12 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Native preview — wrap in RepaintBoundary so the texture compositing
-        // layer is isolated; Flutter won't re-rasterize it when overlays change.
-        RepaintBoundary(child: Texture(textureId: _textureId!)),
+        if (_textureId != null)
+          // Native preview — wrap in RepaintBoundary so the texture compositing
+          // layer is isolated; Flutter won't re-rasterize it when overlays change.
+          RepaintBoundary(child: Texture(textureId: _textureId!))
+        else
+          const ColoredBox(color: Colors.black),
 
         // Bounding-box overlay — kept in its own RepaintBoundary so the
         // raster cache for the Texture is NOT invalidated on every detection.
@@ -246,7 +315,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
 
         // HUD — light widget, doesn't need its own boundary
         Positioned(
-          top: 12, right: 12,
+          top: 12,
+          right: 12,
           child: _Hud(
             fps: _fps,
             inferMs: _inferMs,
@@ -254,8 +324,50 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
             risk: _riskAssessment.overall,
           ),
         ),
+        if (_textureId == null)
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.inferenceEnabled)
+                  const CircularProgressIndicator(color: Color(0xFF1A73E8)),
+                if (widget.inferenceEnabled) const SizedBox(height: 16),
+                Text(
+                  widget.inferenceEnabled
+                      ? 'Starting camera…'
+                      : 'Inference is paused',
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        Positioned(
+          left: 12,
+          bottom: 20,
+          child: FilledButton.icon(
+            onPressed: _controlEnabled()
+                ? () {
+                    final next = !widget.inferenceEnabled;
+                    widget.onInferenceChanged(next);
+                  }
+                : null,
+            icon: Icon(
+              widget.inferenceEnabled ? Icons.pause_circle : Icons.play_circle,
+            ),
+            label: Text(
+              widget.inferenceEnabled ? 'Stop Inference' : 'Start Inference',
+            ),
+          ),
+        ),
       ],
     );
+  }
+
+  bool _controlEnabled() {
+    if (!widget.controlsEnabled) return false;
+    if (_cameraStarting || _cameraStopping) return false;
+    if (widget.inferenceEnabled && _textureId == null) return false;
+    return true;
   }
 }
 
@@ -302,8 +414,8 @@ class _FullscreenDetectionPainter extends CustomPainter {
 
 class _Hud extends StatelessWidget {
   final double fps;
-  final int    inferMs;
-  final int    count;
+  final int inferMs;
+  final int count;
   final RiskLevel risk;
   const _Hud({
     required this.fps,
@@ -324,13 +436,18 @@ class _Hud extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          _hudRow(Icons.speed,          Colors.greenAccent,
-              '${fps.toStringAsFixed(1)} FPS'),
+          _hudRow(
+            Icons.speed,
+            Colors.greenAccent,
+            '${fps.toStringAsFixed(1)} FPS',
+          ),
           const SizedBox(height: 2),
           _hudRow(Icons.timer_outlined, Colors.blue, '$inferMs ms'),
           const SizedBox(height: 2),
-          Text('$count object${count == 1 ? '' : 's'}',
-              style: const TextStyle(color: Colors.white60, fontSize: 11)),
+          Text(
+            '$count object${count == 1 ? '' : 's'}',
+            style: const TextStyle(color: Colors.white60, fontSize: 11),
+          ),
           const SizedBox(height: 2),
           Text(
             'Risk: ${risk.name.toUpperCase()}',
@@ -355,10 +472,14 @@ class _Hud extends StatelessWidget {
     children: [
       Icon(icon, color: color, size: 12),
       const SizedBox(width: 4),
-      Text(text,
-          style: TextStyle(
-              color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+      Text(
+        text,
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
     ],
   );
 }
-

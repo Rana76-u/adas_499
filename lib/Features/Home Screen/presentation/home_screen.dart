@@ -17,6 +17,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final NativeDetectionBridge _bridge = NativeDetectionBridge();
 
   bool _modelLoaded = false;
+  bool _isInferenceOn = true;
   String? _loadError;
   int _selectedTab = 0;
 
@@ -60,7 +61,15 @@ class _HomeScreenState extends State<HomeScreen> {
       body: _buildBody(),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedTab,
-        onTap: (i) => setState(() => _selectedTab = i),
+        onTap: (i) {
+          setState(() {
+            _selectedTab = i;
+            if (i != 0) {
+              // Leave Live Feed => immediately stop inference.
+              _isInferenceOn = false;
+            }
+          });
+        },
         backgroundColor: const Color(0xFF0D0D1F),
         selectedItemColor: const Color(0xFF1A73E8),
         unselectedItemColor: Colors.white38,
@@ -137,7 +146,15 @@ class _HomeScreenState extends State<HomeScreen> {
       index: _selectedTab,
       children: [
         // Gate camera screen behind explicit permission handling.
-        LiveCameraPermissionGate(bridge: _bridge),
+        LiveCameraPermissionGate(
+          bridge: _bridge,
+          inferenceEnabled: _isInferenceOn,
+          controlsEnabled: _modelLoaded,
+          onInferenceChanged: (enabled) {
+            if (!mounted) return;
+            setState(() => _isInferenceOn = enabled);
+          },
+        ),
         // Image tab still works the same way
         SettingsScreen(),
       ],
