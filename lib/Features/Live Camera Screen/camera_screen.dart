@@ -321,6 +321,25 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
             ),
           ),
         ),
+        IgnorePointer(
+          child: AnimatedOpacity(
+            opacity: _riskAssessment.overall == RiskLevel.high && _highRiskFlashOn
+                ? 1
+                : 0,
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.easeOut,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.redAccent.withValues(alpha: 0.10),
+                border: Border.all(
+                  color: Colors.redAccent.withValues(alpha: 0.70),
+                  width: 5,
+                ),
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ),
         if (_textureId == null)
           Center(
             child: Column(
