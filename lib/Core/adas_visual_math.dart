@@ -23,16 +23,14 @@ double defaultObjectHeightMeters(String label) {
   final k = label.toLowerCase();
   const m = {
     'person': 1.67,
-    'bicycle': 0.8,
-    'car': 1.5,
-    'motorcycle': 0.8,
-    'bus': 3.0,
-    'truck': 3.2,
-    'rickshaw': 1.75,
-    'other-vehicle': 1.75,
-    'cng': 1.5,
-    'dog': 0.5,
-    'cat': 0.25,
+    'bicycle': 1.66,
+    'car': 1.46,
+    'motorcycle': 1.65,
+    'bus': 3.4,
+    'truck': 5.8,
+    'rickshaw': 2.0,
+    'other-vehicle': 1.95,
+    'cng': 1.70
   };
   return m[k] ?? 1.67;
 }

@@ -24,6 +24,7 @@ dependencies:
 
   # Permissions
   permission_handler: ^11.3.0
+  geolocator: ^13.0.2
   flutter_ringtone_player: ^4.0.0+4
   vibration: ^3.1.8
   wakelock_plus: ^1.6.0

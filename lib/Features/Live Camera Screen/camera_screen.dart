@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:vibration/vibration.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -53,8 +54,12 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   bool _highRiskToneActive = false;
   final FlutterRingtonePlayer _ringtonePlayer = FlutterRingtonePlayer();
   StreamSubscription<NativeFrame>? _detectionSub;
+  StreamSubscription<Position>? _positionSub;
   bool _cameraStarting = false;
   bool _cameraStopping = false;
+  double _speedKmh = 0;
+  String _roadSignMessage = 'No road sign detected.';
+  String _actionMessage = 'Drive carefully and obey traffic rules.';
 
   @override
   void initState() {
@@ -63,6 +68,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     if (widget.inferenceEnabled) {
       _startNativeCamera();
     }
+    _startSpeedTracking();
   }
 
   Future<void> _startNativeCamera() async {
@@ -136,8 +142,132 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
         frame.detections,
         const ui.Rect.fromLTWH(0, 0, 1, 1),
       );
+      _updateRoadSignGuidance(frame.detections);
     });
     _updateRiskAlerts(_riskAssessment.overall);
+  }
+
+  Future<void> _startSpeedTracking() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (!mounted) return;
+      setState(() {
+        _actionMessage = 'Enable GPS/location service to show speed.';
+      });
+      return;
+    }
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      if (!mounted) return;
+      setState(() {
+        _actionMessage = 'Location permission needed for speed monitoring.';
+      });
+      return;
+    }
+
+    _positionSub?.cancel();
+    _positionSub =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.bestForNavigation,
+            distanceFilter: 2,
+          ),
+        ).listen((position) {
+          if (!mounted) return;
+          final speedMs = position.speed.isFinite && position.speed >= 0
+              ? position.speed
+              : 0.0;
+          setState(() {
+            _speedKmh = speedMs * 3.6;
+            _updateRoadSignGuidance(_detections);
+          });
+        });
+  }
+
+  void _updateRoadSignGuidance(List<Detection> detections) {
+    final relevantDetections = detections
+        .where(
+          (d) => isBlueRoadSignLabel(d.label) || isRoadDamageLabel(d.label),
+        )
+        .toList();
+    if (relevantDetections.isEmpty) {
+      _roadSignMessage = 'No road sign detected.';
+      _actionMessage = 'Drive carefully and obey traffic rules.';
+      return;
+    }
+
+    relevantDetections.sort((a, b) => b.confidence.compareTo(a.confidence));
+    final detectedLabel = relevantDetections.first.label;
+    if (isRoadDamageLabel(detectedLabel)) {
+      _roadSignMessage = 'Detected road damage: $detectedLabel';
+      _actionMessage = _advisoryForRoadDamage(detectedLabel);
+      return;
+    }
+
+    _roadSignMessage = 'Detected sign: $detectedLabel';
+    _actionMessage = _advisoryForSign(detectedLabel, _speedKmh);
+  }
+
+  String _advisoryForSign(String label, double speedKmh) {
+    final speedLimit = _speedLimitFromLabel(label);
+    if (speedLimit != null) {
+      if (speedKmh > speedLimit) {
+        return 'Reduce speed now: limit is $speedLimit km/h, your speed is '
+            '${speedKmh.toStringAsFixed(0)} km/h.';
+      }
+      return 'Maintain at or below $speedLimit km/h. Current speed is '
+          '${speedKmh.toStringAsFixed(0)} km/h.';
+    }
+
+    return switch (label) {
+      'Crossroads' =>
+        'Approach slowly and check all directions before crossing.',
+      'Hospital Ahead' => 'Reduce horn use and drive slowly near the hospital.',
+      'Junction Ahead' => 'Prepare to slow down and watch for joining traffic.',
+      'Mosque Ahead' => 'Drive slowly and stay alert for pedestrians nearby.',
+      'No Pedestrians' => 'Keep lane discipline and do not stop unexpectedly.',
+      'No Vehicle Entry' =>
+        'Do not enter this road. Choose an alternate route.',
+      'Pedestrians Crossing' =>
+        'Slow down and be ready to stop for pedestrians.',
+      'School Ahead' => 'Slow down and watch carefully for children crossing.',
+      'Sharp Left Turn' => 'Reduce speed and steer carefully to the left.',
+      'Sharp Right Turn' => 'Reduce speed and steer carefully to the right.',
+      'Side Road On Left' =>
+        'Watch for vehicles entering from the left side road.',
+      'Side Road On Right' =>
+        'Watch for vehicles entering from the right side road.',
+      'Speed Breaker' =>
+        'Slow down immediately to pass the speed breaker safely.',
+      'Traffic Merges From Left' =>
+        'Keep safe gap and watch for merging vehicles from left.',
+      'Traffic Merges From Right' =>
+        'Keep safe gap and watch for merging vehicles from right.',
+      'U Turn' => 'Be prepared for vehicles making U-turns ahead.',
+      _ => 'Proceed with caution and follow this road sign.',
+    };
+  }
+
+  int? _speedLimitFromLabel(String label) {
+    if (label == 'Speed Limit 20 km') return 20;
+    if (label == 'Speed Limit 40Km') return 40;
+    if (label == 'Speed Limit 80Km') return 80;
+    return null;
+  }
+
+  String _advisoryForRoadDamage(String label) {
+    return switch (label) {
+      'pothole' =>
+        'Pothole ahead: slow down, hold steering firmly, and avoid sudden braking.',
+      'crack' =>
+        'Road crack ahead: reduce speed and pass carefully while maintaining lane control.',
+      _ => 'Road damage detected ahead. Slow down and proceed carefully.',
+    };
   }
 
   void _updateRiskAlerts(RiskLevel currentRisk) {
@@ -270,7 +400,9 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     _stopHighRiskLoop();
     unawaited(_stopNativeCamera());
+    unawaited(_positionSub?.cancel());
     _detectionSub = null;
+    _positionSub = null;
     super.dispose();
   }
 
@@ -295,16 +427,15 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       fit: StackFit.expand,
       children: [
         Positioned.fill(
-          child:
-              _textureId != null
-                  // Rotate only preview texture; detections remain in native display space.
-                  ? RepaintBoundary(
-                    child: RotatedBox(
-                      quarterTurns: cameraQuarterTurns,
-                      child: Texture(textureId: _textureId!),
-                    ),
-                  )
-                  : const ColoredBox(color: Colors.black),
+          child: _textureId != null
+              // Rotate only preview texture; detections remain in native display space.
+              ? RepaintBoundary(
+                  child: RotatedBox(
+                    quarterTurns: cameraQuarterTurns,
+                    child: Texture(textureId: _textureId!),
+                  ),
+                )
+              : const ColoredBox(color: Colors.black),
         ),
 
         // Bounding-box overlay — kept in its own RepaintBoundary so the
@@ -323,7 +454,8 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
         ),
         IgnorePointer(
           child: AnimatedOpacity(
-            opacity: _riskAssessment.overall == RiskLevel.high && _highRiskFlashOn
+            opacity:
+                _riskAssessment.overall == RiskLevel.high && _highRiskFlashOn
                 ? 1
                 : 0,
             duration: const Duration(milliseconds: 120),
@@ -358,6 +490,15 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
             ),
           ),
         // HUD — light widget, doesn't need its own boundary
+        Positioned(
+          left: 12,
+          top: 12,
+          child: _DrivingInfo(
+            speedKmh: _speedKmh,
+            roadSignMessage: _roadSignMessage,
+            actionMessage: _actionMessage,
+          ),
+        ),
         Positioned(
           top: 12,
           right: 12,
@@ -509,4 +650,55 @@ class _Hud extends StatelessWidget {
       ),
     ],
   );
+}
+
+class _DrivingInfo extends StatelessWidget {
+  final double speedKmh;
+  final String roadSignMessage;
+  final String actionMessage;
+
+  const _DrivingInfo({
+    required this.speedKmh,
+    required this.roadSignMessage,
+    required this.actionMessage,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 260),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.65),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.55)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Speed: ${speedKmh.toStringAsFixed(0)} km/h',
+              style: const TextStyle(
+                color: Colors.lightBlueAccent,
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              roadSignMessage,
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              actionMessage,
+              style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
