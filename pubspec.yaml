@@ -40,5 +40,3 @@ flutter:
   assets:
     # All TFLite models — the native Kotlin code loads these via AssetManager
     - assets/models/
-    # Labels file
-    - assets/labels.txt

@@ -52,6 +52,9 @@ const Set<String> kRoadDamageLabels = {'pothole', 'crack'};
 
 bool isRoadDamageLabel(String label) => kRoadDamageLabels.contains(label);
 
+bool isMinimalBlueOverlayLabel(String label) =>
+    isBlueRoadSignLabel(label) || isRoadDamageLabel(label);
+
 const Set<String> kRiskVehicleLabels = {
   'bicycle',
   'bus',
@@ -64,9 +67,6 @@ const Set<String> kRiskVehicleLabels = {
 };
 
 bool isRiskVehicleLabel(String label) => kRiskVehicleLabels.contains(label);
-
-bool isRoadSignOrDamageLabel(String label) =>
-    isBlueRoadSignLabel(label) || isRoadDamageLabel(label);
 
 Color colorForLabel(String label) =>
     _palette[label.hashCode.abs() % _palette.length];
@@ -177,6 +177,7 @@ RiskAssessment assessRiskLevels(
   );
 
   for (final det in detections) {
+    if (isMinimalBlueOverlayLabel(det.label)) continue;
     final bb = det.boundingBox;
     final cx = (bb.left + bb.right) / 2;
     final cy = (bb.top + bb.bottom) / 2;
@@ -238,22 +239,23 @@ void drawDetections(
   bool highRiskFlashOn = true,
 }) {
   for (final det in detections) {
+    final isMinimalBlueOverlay = isMinimalBlueOverlayLabel(det.label);
     final riskLevel = det.hasTrackId ? riskByTrackId[det.trackId] : null;
     final isRiskVehicle = isRiskVehicleLabel(det.label);
-    final color = switch (riskLevel) {
-      RiskLevel.high =>
-        highRiskFlashOn ? const Color(0xFFFF0000) : const Color(0xFFFF5A5A),
-      RiskLevel.medium => const Color(0xFFFFA500),
-      RiskLevel.low => isRiskVehicle ? Colors.white : const Color(0xFFFFFF00),
-      _ =>
-        isBlueRoadSignLabel(det.label)
-            ? const Color(0xFF007AFF)
-            : isRoadDamageLabel(det.label)
-            ? const Color(0xFFFFFF00)
-            : isRiskVehicle
-            ? Colors.white
-            : colorForLabel(det.label),
-    };
+    final color = isMinimalBlueOverlay
+        ? (isRoadDamageLabel(det.label)
+              ? const Color(0xFFFFFF00)
+              : const Color(0xFF007AFF))
+        : switch (riskLevel) {
+            RiskLevel.high => highRiskFlashOn
+                ? const Color(0xFFFF0000)
+                : const Color(0xFFFF5A5A),
+            RiskLevel.medium => const Color(0xFFFFA500),
+            RiskLevel.low => isRiskVehicle
+                ? Colors.white
+                : const Color(0xFFFFFF00),
+            _ => isRiskVehicle ? Colors.white : colorForLabel(det.label),
+          };
     final bb = det.boundingBox;
 
     final l = displayRect.left + bb.left * displayRect.width;
@@ -267,26 +269,36 @@ void drawDetections(
         riskLevel != RiskLevel.high &&
         riskLevel != RiskLevel.medium;
 
-    _fillPaint.color = color.withValues(
-      alpha: isThinVehicleStyle ? 0.05 : 0.15,
-    );
-    canvas.drawRect(rect, _fillPaint);
+    if (!isMinimalBlueOverlay) {
+      _fillPaint.color = color.withValues(
+        alpha: isThinVehicleStyle ? 0.05 : 0.15,
+      );
+      canvas.drawRect(rect, _fillPaint);
+    }
 
-    _borderPaint.strokeWidth = isThinVehicleStyle ? 1.0 : 2.5;
+    _borderPaint.strokeWidth = isMinimalBlueOverlay
+        ? 2.0
+        : (isThinVehicleStyle ? 1.0 : 2.5);
     _borderPaint.color = color;
     canvas.drawRect(rect, _borderPaint);
 
-    _drawCorners(canvas, rect, color, thin: isThinVehicleStyle);
+    if (!isMinimalBlueOverlay) {
+      _drawCorners(canvas, rect, color, thin: isThinVehicleStyle);
+    }
 
     final badgeAnchorY = t < 28 ? b + 2 : t;
-    final simpleLabelOnly = isRoadSignOrDamageLabel(det.label);
-    final idPrefix = simpleLabelOnly
-        ? ''
-        : (det.hasTrackId ? 'ID:${det.trackId} · ' : '');
-    var line = simpleLabelOnly
+    final idPrefix = !isMinimalBlueOverlay && det.hasTrackId
+        ? 'ID:${det.trackId} · '
+        : '';
+    var line = isMinimalBlueOverlay
         ? det.label
         : '$idPrefix${det.label}  ${(det.confidence * 100).toStringAsFixed(0)}%';
-    if (showMonocularDistance && !simpleLabelOnly) {
+    final badgeTextColor = color.value == const Color(0xFFFFFF00).value
+        ? Colors.black
+        : (color.value == Colors.white.value
+              ? const Color(0xFF4A4A4A)
+              : Colors.white);
+    if (!isMinimalBlueOverlay && showMonocularDistance) {
       final dist = estimateDistanceMeters(
         boxHeightNorm: bb.height,
         label: det.label,
@@ -301,11 +313,14 @@ void drawDetections(
       Offset(l, badgeAnchorY),
       color,
       above: t >= 28,
-      thinText: isThinVehicleStyle,
+      thinText: isThinVehicleStyle && !isMinimalBlueOverlay,
+      textColor: badgeTextColor,
     );
 
     // Keep low-risk warning subtle: add a compact warning icon only.
-    if (riskLevel == RiskLevel.low && !isThinVehicleStyle) {
+    if (!isMinimalBlueOverlay &&
+        riskLevel == RiskLevel.low &&
+        !isThinVehicleStyle) {
       _drawSubLabelColored(
         canvas,
         '⚠',
@@ -323,24 +338,18 @@ void drawTrailsAndPredictedPaths(
   List<Detection> detections,
   Map<int, List<Offset>> trailNormByTrack,
 ) {
-  for (final e in trailNormByTrack.entries) {
-    final hist = e.value;
-    if (hist.length > 1) {
-      for (var i = 1; i < hist.length; i++) {
-        canvas.drawLine(
-          _normToScreen(hist[i - 1], displayRect),
-          _normToScreen(hist[i], displayRect),
-          _trailPaint,
-        );
-      }
-    }
-  }
-
   for (final det in detections) {
+    if (isMinimalBlueOverlayLabel(det.label)) continue;
     if (!det.hasTrackId) continue;
-    if (isRoadSignOrDamageLabel(det.label)) continue;
     final pts = trailNormByTrack[det.trackId];
     if (pts == null || pts.length < 2) continue;
+    for (var i = 1; i < pts.length; i++) {
+      canvas.drawLine(
+        _normToScreen(pts[i - 1], displayRect),
+        _normToScreen(pts[i], displayRect),
+        _trailPaint,
+      );
+    }
     final pred = predictTrajectoryNorm(pts, _kPredictionSteps);
     if (pred.length < 2) continue;
     for (var i = 0; i < pred.length - 1; i++) {
@@ -363,8 +372,8 @@ void drawVelocityArrowsAndLabels(
   const speedThresholdNorm = 0.003;
 
   for (final det in detections) {
+    if (isMinimalBlueOverlayLabel(det.label)) continue;
     if (!det.hasTrackId) continue;
-    if (isRoadSignOrDamageLabel(det.label)) continue;
     final sp = speedNormPerSec(det.vxNormPerSec, det.vyNormPerSec);
     if (sp <= speedThresholdNorm) continue;
 
@@ -422,8 +431,8 @@ void drawRiskOverlay(
   );
 
   for (final det in detections) {
+    if (isMinimalBlueOverlayLabel(det.label)) continue;
     if (!det.hasTrackId) continue;
-    if (isRoadSignOrDamageLabel(det.label)) continue;
     final level = risk.byTrackId[det.trackId];
     if (level == null || level == RiskLevel.none) continue;
     if (isRiskVehicleLabel(det.label) && level == RiskLevel.low) continue;
@@ -564,10 +573,13 @@ void _drawBadge(
   Color color, {
   required bool above,
   bool thinText = false,
+  Color textColor = Colors.white,
 }) {
   _tp.text = TextSpan(
     text: text,
-    style: thinText ? _badgeStyleThin : _badgeStyle,
+    style: (thinText ? _badgeStyleThin : _badgeStyle).copyWith(
+      color: textColor,
+    ),
   );
   _tp.layout();
 

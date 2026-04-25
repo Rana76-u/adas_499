@@ -103,8 +103,8 @@ const List<String> customLabels = [
   'other-vehicle',
   'person',
   'rickshaw',
-  'pothole',
   'crack',
+  'pothole',
 ];
 
 const List<String> cocoLabels = [
