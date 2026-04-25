@@ -490,25 +490,30 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
             ),
           ),
         // HUD — light widget, doesn't need its own boundary
-        Positioned(
-          left: 12,
-          top: 12,
-          child: _DrivingInfo(
-            speedKmh: _speedKmh,
-            roadSignMessage: _roadSignMessage,
-            actionMessage: _actionMessage,
+        Align(
+          alignment: Alignment.topCenter,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: _DrivingInfo(
+              roadSignMessage: _roadSignMessage,
+              actionMessage: _actionMessage,
+            ),
           ),
         ),
+   
+        // FPS, inference time, and risk level HUD
         Positioned(
           top: 12,
           right: 12,
           child: _Hud(
+            speedKmh: _speedKmh,
             fps: _fps,
             inferMs: _inferMs,
             count: _detections.length,
             risk: _riskAssessment.overall,
           ),
         ),
+        // Inference control button
         Positioned(
           left: 12,
           bottom: 20,
@@ -581,11 +586,13 @@ class _FullscreenDetectionPainter extends CustomPainter {
 // ── HUD ───────────────────────────────────────────────────────────────────────
 
 class _Hud extends StatelessWidget {
+  final double speedKmh;
   final double fps;
   final int inferMs;
   final int count;
   final RiskLevel risk;
   const _Hud({
+    required this.speedKmh,
     required this.fps,
     required this.inferMs,
     required this.count,
@@ -607,29 +614,10 @@ class _Hud extends StatelessWidget {
           _hudRow(
             Icons.speed,
             Colors.greenAccent,
-            '${fps.toStringAsFixed(1)} FPS',
+            'Speed: ${speedKmh.toStringAsFixed(0)} km/h',
           ),
           const SizedBox(height: 2),
-          _hudRow(Icons.timer_outlined, Colors.blue, '$inferMs ms'),
-          const SizedBox(height: 2),
-          Text(
-            '$count object${count == 1 ? '' : 's'}',
-            style: const TextStyle(color: Colors.white60, fontSize: 11),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'Risk: ${risk.name.toUpperCase()}',
-            style: TextStyle(
-              color: switch (risk) {
-                RiskLevel.high => Colors.redAccent,
-                RiskLevel.medium => Colors.orangeAccent,
-                RiskLevel.low => Colors.yellowAccent,
-                RiskLevel.none => Colors.white54,
-              },
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+          _hudRow(Icons.timer_outlined, Colors.blue, 'Inf. Time: $inferMs ms'),
         ],
       ),
     );
@@ -653,12 +641,10 @@ class _Hud extends StatelessWidget {
 }
 
 class _DrivingInfo extends StatelessWidget {
-  final double speedKmh;
   final String roadSignMessage;
   final String actionMessage;
 
   const _DrivingInfo({
-    required this.speedKmh,
     required this.roadSignMessage,
     required this.actionMessage,
   });
@@ -666,9 +652,9 @@ class _DrivingInfo extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 260),
+      constraints: BoxConstraints(maxWidth: double.infinity),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.65),
           borderRadius: BorderRadius.circular(10),
@@ -679,22 +665,13 @@ class _DrivingInfo extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Speed: ${speedKmh.toStringAsFixed(0)} km/h',
-              style: const TextStyle(
-                color: Colors.lightBlueAccent,
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
               roadSignMessage,
               style: const TextStyle(color: Colors.white, fontSize: 12),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 0),
             Text(
               actionMessage,
-              style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+              style: const TextStyle(color: Colors.orangeAccent, fontSize: 12, fontWeight: FontWeight.bold),
             ),
           ],
         ),
