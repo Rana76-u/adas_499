@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'adas_visual_math.dart';
+import 'runtime_tuning.dart';
 import 'yolo_model.dart';
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -299,9 +300,12 @@ void drawDetections(
               ? const Color(0xFF4A4A4A)
               : Colors.white);
     if (!isMinimalBlueOverlay && showMonocularDistance) {
+      final tuning = runtimeTuningNotifier.value;
       final dist = estimateDistanceMeters(
         boxHeightNorm: bb.height,
         label: det.label,
+        focalLengthMm: tuning.focalLengthMm,
+        sensorHeightMm: tuning.sensorHeightMm,
       );
       if (dist.isFinite && dist > 0.3 && dist < 250) {
         line += '  D:${dist.toStringAsFixed(1)}m';

@@ -9,6 +9,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../Core/detection_painter.dart';
 import '../../Core/native_detection_bridge.dart';
+import '../../Core/runtime_tuning.dart';
 import '../../Core/yolo_model.dart';
 
 /// Live camera detection screen.
@@ -65,10 +66,25 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    runtimeTuningNotifier.addListener(_onRuntimeTuningChanged);
     if (widget.inferenceEnabled) {
       _startNativeCamera();
     }
     _startSpeedTracking();
+  }
+
+  void _onRuntimeTuningChanged() {
+    if (!mounted) return;
+    final tuning = runtimeTuningNotifier.value;
+    setState(() {
+      _riskAssessment = assessRiskLevels(
+        _detections,
+        const ui.Rect.fromLTWH(0, 0, 1, 1),
+        ttcThresholdSeconds: tuning.ttcThresholdSeconds,
+        collisionDistPixels: tuning.collisionDistPixels,
+      );
+    });
+    _updateRiskAlerts(_riskAssessment.overall);
   }
 
   Future<void> _startNativeCamera() async {
@@ -138,9 +154,12 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
       _fps = frame.fps;
       _inferMs = frame.inferMs;
       _updateTrails(frame.detections);
+      final tuning = runtimeTuningNotifier.value;
       _riskAssessment = assessRiskLevels(
         frame.detections,
         const ui.Rect.fromLTWH(0, 0, 1, 1),
+        ttcThresholdSeconds: tuning.ttcThresholdSeconds,
+        collisionDistPixels: tuning.collisionDistPixels,
       );
       _updateRoadSignGuidance(frame.detections);
     });
@@ -398,6 +417,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    runtimeTuningNotifier.removeListener(_onRuntimeTuningChanged);
     _stopHighRiskLoop();
     unawaited(_stopNativeCamera());
     unawaited(_positionSub?.cancel());
@@ -562,6 +582,7 @@ class _FullscreenDetectionPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = ui.Rect.fromLTWH(0, 0, size.width, size.height);
+    final tuning = runtimeTuningNotifier.value;
     drawTrailsAndPredictedPaths(canvas, rect, detections, trailNormByTrack);
     drawDetections(
       canvas,
@@ -572,7 +593,13 @@ class _FullscreenDetectionPainter extends CustomPainter {
       highRiskFlashOn: highRiskFlashOn,
     );
     drawVelocityArrowsAndLabels(canvas, rect, detections);
-    drawRiskOverlay(canvas, rect, detections);
+    drawRiskOverlay(
+      canvas,
+      rect,
+      detections,
+      ttcThresholdSeconds: tuning.ttcThresholdSeconds,
+      collisionDistPixels: tuning.collisionDistPixels,
+    );
   }
 
   @override
