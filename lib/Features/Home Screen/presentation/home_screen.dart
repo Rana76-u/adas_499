@@ -2,8 +2,8 @@ import 'package:adas_499/Features/Live%20Camera%20Screen/live_camera_permission_
 import 'package:adas_499/Features/Settings%20Screen/settings_screen.dart';
 import 'package:adas_499/Shared/custom_appbar.dart';
 import 'package:flutter/material.dart';
+import 'package:adas_499/Core/model_config.dart';
 import 'package:adas_499/Core/native_detection_bridge.dart';
-import 'package:adas_499/Core/yolo_model.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,6 +20,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isInferenceOn = true;
   String? _loadError;
   int _selectedTab = 0;
+  ModelConfig _selectedModel = availableModels.first;
+  ModelConfig? _previousModel;
 
   @override
   void initState() {
@@ -30,21 +32,51 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadModel() async {
     try {
       await _bridge.loadModel(
-        modelPath:
-            'assets/models/best_float32_kaggle.tflite', //yolo11n_int8 //android/app/src/main/
-        labels: customLabels, // swap to cocoLabels if using a COCO model
-        delegate: 'gpu', // 'gpu' | 'nnapi' | 'cpu'
+        modelPath: _selectedModel.modelPath,
+        labels: _selectedModel.labels,
+        delegate: _selectedModel.delegate,
       );
       if (mounted) setState(() => _modelLoaded = true);
     } catch (e) {
       if (mounted) {
         setState(
           () => _loadError =
-              'Failed to load model.\n\n'
+              'Failed to load model: ${_selectedModel.name}\n\n'
               'Make sure the .tflite file is listed in pubspec assets.\n\n'
               'Error: $e',
         );
       }
+    }
+  }
+
+  Future<void> _switchModel(ModelConfig newModel) async {
+    if (_selectedModel == newModel) return;
+
+    _previousModel = _selectedModel;
+    final wasInferenceOn = _isInferenceOn;
+
+    if (_isInferenceOn) {
+      setState(() => _isInferenceOn = false);
+    }
+
+    setState(() {
+      _selectedModel = newModel;
+      _modelLoaded = false;
+      _loadError = null;
+    });
+
+    await _loadModel();
+
+    if (_modelLoaded && wasInferenceOn && mounted) {
+      setState(() => _isInferenceOn = true);
+    }
+
+    if (!_modelLoaded && _previousModel != null && mounted) {
+      setState(() {
+        _selectedModel = _previousModel!;
+        _loadError = 'Failed to load ${newModel.name}. Reverted to ${_previousModel!.name}';
+      });
+      await _loadModel();
     }
   }
 
@@ -63,7 +95,11 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar:
           isLandscape
               ? null
-              : CustomAppbar(modelLoaded: _modelLoaded) as PreferredSizeWidget,
+              : CustomAppbar(
+                  modelLoaded: _modelLoaded,
+                  selectedModel: _selectedModel,
+                  onModelChanged: _modelLoaded ? _switchModel : null,
+                ) as PreferredSizeWidget,
       body: isLandscape ? _buildLandscapeLayout() : _buildBody(),
       bottomNavigationBar: isLandscape ? null : _buildBottomNavigationBar(),
     );
@@ -95,6 +131,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   tooltip: 'Settings',
                   selected: _selectedTab == 1,
                   onTap: () => _onTabSelected(1),
+                ),
+                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: _buildCompactModelSelector(),
                 ),
               ],
             ),
@@ -161,6 +202,72 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  Widget _buildCompactModelSelector() {
+    return Tooltip(
+      message: 'Select Model',
+      child: InkWell(
+        onTap: _modelLoaded ? () => _showModelSelectorBottomSheet() : null,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Icon(
+            Icons.model_training,
+            color: _modelLoaded ? Colors.white70 : Colors.white38,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showModelSelectorBottomSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0D0D1F),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                'Select Model',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            ...availableModels.map((model) => ListTile(
+              title: Text(
+                model.name,
+                style: TextStyle(
+                  color: _selectedModel == model
+                      ? const Color(0xFF1A73E8)
+                      : Colors.white,
+                ),
+              ),
+              trailing: _selectedModel == model
+                  ? const Icon(Icons.check, color: Color(0xFF1A73E8))
+                  : null,
+              onTap: () {
+                Navigator.pop(context);
+                _switchModel(model);
+              },
+            )),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildBody() {
     if (_loadError != null) {
       return Center(
@@ -224,6 +331,7 @@ class _HomeScreenState extends State<HomeScreen> {
           bridge: _bridge,
           inferenceEnabled: _isInferenceOn,
           controlsEnabled: _modelLoaded,
+          modelName: _selectedModel.name,
           onInferenceChanged: (enabled) {
             if (!mounted) return;
             setState(() => _isInferenceOn = enabled);

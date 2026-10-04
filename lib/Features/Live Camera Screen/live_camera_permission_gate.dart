@@ -10,6 +10,7 @@ class LiveCameraPermissionGate extends StatefulWidget {
   final NativeDetectionBridge bridge;
   final bool inferenceEnabled;
   final bool controlsEnabled;
+  final String modelName;
   final ValueChanged<bool> onInferenceChanged;
 
   const LiveCameraPermissionGate({
@@ -17,6 +18,7 @@ class LiveCameraPermissionGate extends StatefulWidget {
     required this.bridge,
     required this.inferenceEnabled,
     required this.controlsEnabled,
+    required this.modelName,
     required this.onInferenceChanged,
   });
 
@@ -129,6 +131,7 @@ class _LiveCameraPermissionGateState extends State<LiveCameraPermissionGate>
         bridge: widget.bridge,
         inferenceEnabled: widget.inferenceEnabled,
         controlsEnabled: widget.controlsEnabled,
+        modelName: widget.modelName,
         onInferenceChanged: widget.onInferenceChanged,
       );
     }

@@ -1,8 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:adas_499/Core/model_config.dart'
+    show ModelConfig, availableModels;
 
 class CustomAppbar extends StatelessWidget implements PreferredSizeWidget{
   final bool _modelLoaded;
-  const CustomAppbar({super.key, required bool modelLoaded}) : _modelLoaded = modelLoaded;
+  final ModelConfig? _selectedModel;
+  final ValueChanged<ModelConfig>? onModelChanged;
+
+  const CustomAppbar({
+    super.key,
+    required bool modelLoaded,
+    required ModelConfig? selectedModel,
+    this.onModelChanged,
+  }) : _modelLoaded = modelLoaded,
+       _selectedModel = selectedModel;
 
   @override
   Size get preferredSize => const Size.fromHeight(kToolbarHeight);
@@ -39,6 +50,38 @@ class CustomAppbar extends StatelessWidget implements PreferredSizeWidget{
           ],
         ),
         actions: [
+          if (_selectedModel != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<ModelConfig>(
+                  value: _selectedModel,
+                  dropdownColor: const Color(0xFF0D0D1F),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                  iconEnabledColor: Colors.white70,
+                  isDense: true,
+                  items: availableModels.map((model) {
+                    return DropdownMenuItem(
+                      value: model,
+                      child: Text(
+                        model.name,
+                        style: TextStyle(
+                          color: _modelLoaded ? Colors.white : Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                  onChanged: _modelLoaded && onModelChanged != null
+                      ? (newModel) {
+                          if (newModel != null) {
+                            onModelChanged!(newModel);
+                          }
+                        }
+                      : null,
+                ),
+              ),
+            ),
           Container(
             margin: const EdgeInsets.only(right: 12),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),

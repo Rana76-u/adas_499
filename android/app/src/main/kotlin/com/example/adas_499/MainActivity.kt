@@ -57,6 +57,7 @@ class MainActivity : FlutterActivity() {
     private var labels: List<String>          = emptyList()
     private var numClasses                    = 0
     private var isFloat32Model                = true
+    private var isNCHW                         = false  // true for [1,3,H,W], false for [1,H,W,3]
 
     // Pre-allocated I/O buffers (never reallocated after loadModel)
     private var inputBuffer:  ByteBuffer?               = null
@@ -210,8 +211,12 @@ class MainActivity : FlutterActivity() {
 
         val inputTensor = interpreter!!.getInputTensor(0)
         isFloat32Model  = (inputTensor.dataType() == DataType.FLOAT32)
-        Log.i(TAG, "Input shape: ${inputTensor.shape().contentToString()}  " +
-            "dtype=${if (isFloat32Model) "float32" else "int8/uint8"}")
+        val inputShape  = inputTensor.shape()
+        // Detect layout: [1,3,H,W] = NCHW, [1,H,W,3] = NHWC
+        isNCHW = (inputShape.size == 4 && inputShape[1] == 3 && inputShape[3] == INPUT_SIZE)
+        Log.i(TAG, "Input shape: ${inputShape.contentToString()}  " +
+            "dtype=${if (isFloat32Model) "float32" else "int8/uint8"}  " +
+            "layout=${if (isNCHW) "NCHW" else "NHWC"}")
 
         val bytesPerElem = if (isFloat32Model) 4 else 1
         inputBuffer = ByteBuffer
@@ -402,16 +407,46 @@ class MainActivity : FlutterActivity() {
 
         if (isFloat32Model) {
             val inv255 = 1f / 255f
-            for (p in px) {
-                iBuf.putFloat(((p shr 16) and 0xFF) * inv255)
-                iBuf.putFloat(((p shr  8) and 0xFF) * inv255)
-                iBuf.putFloat(( p         and 0xFF) * inv255)
+            if (isNCHW) {
+                // NCHW: write all R, then all G, then all B
+                val size = INPUT_SIZE * INPUT_SIZE
+                for (i in 0 until size) {
+                    iBuf.putFloat(((px[i] shr 16) and 0xFF) * inv255)
+                }
+                for (i in 0 until size) {
+                    iBuf.putFloat(((px[i] shr  8) and 0xFF) * inv255)
+                }
+                for (i in 0 until size) {
+                    iBuf.putFloat(( px[i]         and 0xFF) * inv255)
+                }
+            } else {
+                // NHWC: write RGB per pixel
+                for (p in px) {
+                    iBuf.putFloat(((p shr 16) and 0xFF) * inv255)
+                    iBuf.putFloat(((p shr  8) and 0xFF) * inv255)
+                    iBuf.putFloat(( p         and 0xFF) * inv255)
+                }
             }
         } else {
-            for (p in px) {
-                iBuf.put(((p shr 16) and 0xFF).toByte())
-                iBuf.put(((p shr  8) and 0xFF).toByte())
-                iBuf.put(( p         and 0xFF).toByte())
+            if (isNCHW) {
+                // NCHW: write all R, then all G, then all B
+                val size = INPUT_SIZE * INPUT_SIZE
+                for (i in 0 until size) {
+                    iBuf.put(((px[i] shr 16) and 0xFF).toByte())
+                }
+                for (i in 0 until size) {
+                    iBuf.put(((px[i] shr  8) and 0xFF).toByte())
+                }
+                for (i in 0 until size) {
+                    iBuf.put(( px[i]         and 0xFF).toByte())
+                }
+            } else {
+                // NHWC: write RGB per pixel
+                for (p in px) {
+                    iBuf.put(((p shr 16) and 0xFF).toByte())
+                    iBuf.put(((p shr  8) and 0xFF).toByte())
+                    iBuf.put(( p         and 0xFF).toByte())
+                }
             }
         }
 
@@ -524,6 +559,7 @@ class MainActivity : FlutterActivity() {
     // ─────────────────────────────────────────────────────────────────────────
     // Fill TFLite input buffer from the 640×640 letterboxed bitmap.
     // inv255 is hoisted outside the loop to avoid per-pixel division.
+    // Supports both NCHW [1,3,H,W] and NHWC [1,H,W,3] layouts.
     // ─────────────────────────────────────────────────────────────────────────
     private fun fillInputBuffer(bitmap: Bitmap) {
         val buf     = inputBuffer!!
@@ -534,16 +570,46 @@ class MainActivity : FlutterActivity() {
 
         if (isFloat32Model) {
             val inv255 = 1f / 255f
-            for (px in scratch) {
-                buf.putFloat(((px shr 16) and 0xFF) * inv255)
-                buf.putFloat(((px shr  8) and 0xFF) * inv255)
-                buf.putFloat(( px         and 0xFF) * inv255)
+            if (isNCHW) {
+                // NCHW: write all R, then all G, then all B
+                val size = INPUT_SIZE * INPUT_SIZE
+                for (i in 0 until size) {
+                    buf.putFloat(((scratch[i] shr 16) and 0xFF) * inv255)
+                }
+                for (i in 0 until size) {
+                    buf.putFloat(((scratch[i] shr  8) and 0xFF) * inv255)
+                }
+                for (i in 0 until size) {
+                    buf.putFloat(( scratch[i]         and 0xFF) * inv255)
+                }
+            } else {
+                // NHWC: write RGB per pixel
+                for (px in scratch) {
+                    buf.putFloat(((px shr 16) and 0xFF) * inv255)
+                    buf.putFloat(((px shr  8) and 0xFF) * inv255)
+                    buf.putFloat(( px         and 0xFF) * inv255)
+                }
             }
         } else {
-            for (px in scratch) {
-                buf.put(((px shr 16) and 0xFF).toByte())
-                buf.put(((px shr  8) and 0xFF).toByte())
-                buf.put(( px         and 0xFF).toByte())
+            if (isNCHW) {
+                // NCHW: write all R, then all G, then all B
+                val size = INPUT_SIZE * INPUT_SIZE
+                for (i in 0 until size) {
+                    buf.put(((scratch[i] shr 16) and 0xFF).toByte())
+                }
+                for (i in 0 until size) {
+                    buf.put(((scratch[i] shr  8) and 0xFF).toByte())
+                }
+                for (i in 0 until size) {
+                    buf.put(( scratch[i]         and 0xFF).toByte())
+                }
+            } else {
+                // NHWC: write RGB per pixel
+                for (px in scratch) {
+                    buf.put(((px shr 16) and 0xFF).toByte())
+                    buf.put(((px shr  8) and 0xFF).toByte())
+                    buf.put(( px         and 0xFF).toByte())
+                }
             }
         }
     }

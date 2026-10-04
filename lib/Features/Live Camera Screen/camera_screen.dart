@@ -21,12 +21,14 @@ class LiveCameraScreen extends StatefulWidget {
   final NativeDetectionBridge bridge;
   final bool inferenceEnabled;
   final bool controlsEnabled;
+  final String modelName;
   final ValueChanged<bool> onInferenceChanged;
   const LiveCameraScreen({
     super.key,
     required this.bridge,
     required this.inferenceEnabled,
     required this.controlsEnabled,
+    required this.modelName,
     required this.onInferenceChanged,
   });
 
@@ -61,6 +63,9 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
   double _speedKmh = 0;
   String _roadSignMessage = 'No road sign detected.';
   String _actionMessage = 'Drive carefully and obey traffic rules.';
+  Timer? _guidanceMessageTimer;
+  String? _pendingRoadSignMessage;
+  String? _pendingActionMessage;
 
   @override
   void initState() {
@@ -214,22 +219,61 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
           (d) => isBlueRoadSignLabel(d.label) || isRoadDamageLabel(d.label),
         )
         .toList();
+    
+    String newRoadSignMessage;
+    String newActionMessage;
+    
     if (relevantDetections.isEmpty) {
-      _roadSignMessage = 'No road sign detected.';
-      _actionMessage = 'Drive carefully and obey traffic rules.';
-      return;
+      newRoadSignMessage = 'No road sign detected.';
+      newActionMessage = 'Drive carefully and obey traffic rules.';
+    } else {
+      relevantDetections.sort((a, b) => b.confidence.compareTo(a.confidence));
+      final detectedLabel = relevantDetections.first.label;
+      if (isRoadDamageLabel(detectedLabel)) {
+        newRoadSignMessage = 'Detected road damage: $detectedLabel';
+        newActionMessage = _advisoryForRoadDamage(detectedLabel);
+      } else {
+        newRoadSignMessage = 'Detected sign: $detectedLabel';
+        newActionMessage = _advisoryForSign(detectedLabel, _speedKmh);
+      }
     }
 
-    relevantDetections.sort((a, b) => b.confidence.compareTo(a.confidence));
-    final detectedLabel = relevantDetections.first.label;
-    if (isRoadDamageLabel(detectedLabel)) {
-      _roadSignMessage = 'Detected road damage: $detectedLabel';
-      _actionMessage = _advisoryForRoadDamage(detectedLabel);
-      return;
-    }
+    // Store pending messages
+    _pendingRoadSignMessage = newRoadSignMessage;
+    _pendingActionMessage = newActionMessage;
 
-    _roadSignMessage = 'Detected sign: $detectedLabel';
-    _actionMessage = _advisoryForSign(detectedLabel, _speedKmh);
+    // If no timer is active, update immediately and start timer
+    if (_guidanceMessageTimer == null || !_guidanceMessageTimer!.isActive) {
+      _applyGuidanceUpdate();
+      _guidanceMessageTimer = Timer(const Duration(seconds: 3), () {
+        _scheduleGuidanceUpdate();
+      });
+    }
+  }
+
+  void _scheduleGuidanceUpdate() {
+    if (!mounted) return;
+    // Apply the latest pending message if it's different from current
+    if (_pendingRoadSignMessage != null && _pendingActionMessage != null) {
+      if (_pendingRoadSignMessage != _roadSignMessage ||
+          _pendingActionMessage != _actionMessage) {
+        _applyGuidanceUpdate();
+        // Restart timer if there was a change
+        _guidanceMessageTimer = Timer(const Duration(seconds: 3), () {
+          _scheduleGuidanceUpdate();
+        });
+      } else {
+        _guidanceMessageTimer = null;
+      }
+    }
+  }
+
+  void _applyGuidanceUpdate() {
+    if (!mounted) return;
+    setState(() {
+      _roadSignMessage = _pendingRoadSignMessage ?? 'No road sign detected.';
+      _actionMessage = _pendingActionMessage ?? 'Drive carefully and obey traffic rules.';
+    });
   }
 
   String _advisoryForSign(String label, double speedKmh) {
@@ -419,6 +463,7 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     runtimeTuningNotifier.removeListener(_onRuntimeTuningChanged);
     _stopHighRiskLoop();
+    _guidanceMessageTimer?.cancel();
     unawaited(_stopNativeCamera());
     unawaited(_positionSub?.cancel());
     _detectionSub = null;
@@ -549,6 +594,34 @@ class _LiveCameraScreenState extends State<LiveCameraScreen>
             ),
             label: Text(
               widget.inferenceEnabled ? 'Stop Inference' : 'Start Inference',
+            ),
+          ),
+        ),
+        // Model name display in bottom right
+        Positioned(
+          right: 12,
+          bottom: 20,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.60),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.model_training, color: Colors.blueAccent, size: 14),
+                const SizedBox(width: 6),
+                Text(
+                  widget.modelName,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
